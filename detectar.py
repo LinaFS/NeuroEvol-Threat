@@ -3,7 +3,7 @@ import cv2
 
 # Cargar modelos
 modelo_general = YOLO('yolov8n.pt')  # Modelo general (personas, autos, etc.)
-modelo_principal = YOLO('C:/Users/paufu/runs/detect/yolov8_principal/weights/best.pt')
+modelo_principal = ''
 modelo_armas = YOLO('C:/Users/paufu/runs/detect/arma_yolov8_estable/weights/best.pt')  # Modelo armas
 
 # Captura de video desde webcam
