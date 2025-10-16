@@ -5,9 +5,9 @@ from shutil import copy2
 from tqdm import tqdm
 from time import time
 
-csv_path = 'resultados/anotaciones_Armas.csv'
-images_src = 'dataArmas'
-dataset_path = 'datasetArmas'
+csv_path = 'resultados/anotaciones.csv'
+images_src = 'dataSospecha'
+dataset_path = 'proyecto/datasetSospecha'
 
 images_train = os.path.join(dataset_path, 'images/train')
 labels_train = os.path.join(dataset_path, 'labels/train')
