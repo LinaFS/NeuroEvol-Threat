@@ -111,7 +111,7 @@ def procesar_videos(frame_interval=10):
     modo_directorio = seleccionar_opcion()
     
     videos_a_procesar = []
-    output_base = "proyecto/frames_output"
+    output_base = "dataSospecha"
     
     if modo_directorio:
         # Modo directorio
