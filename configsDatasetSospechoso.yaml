@@ -1,0 +1,18 @@
+# ----------------------------------------------------------------------
+# Archivo de configuración del dataset para Ultralytics YOLOv8
+# ----------------------------------------------------------------------
+
+# 1. RUTA DE LA CARPETA RAIZ DEL DATASET
+# (Modifica esta ruta para que sea absoluta o relativa a tu script 'train.py')
+# Se asume que la estructura de carpetas creada por to-yolo.py estará dentro de esta ruta.
+path: datasetSospechoso
+
+# 2. RUTAS DE LOS CONJUNTOS DE DATOS
+# El entrenamiento se realiza con el conjunto 'train'
+# La validación se realiza con el conjunto 'val' (crucial para la métrica FP)
+train: images/train  # Ejemplo: datasetSospechoso/images/train
+val: images/val      # Ejemplo: datasetSospechoso/images/val
+
+# 3. INFORMACIÓN DE LAS CLASES
+nc: 1  # Number of classes (Solo tienes la clase "sospecha")
+names: ['sospecha'] # El nombre de la clase, que se corresponde con el class_id: 0
