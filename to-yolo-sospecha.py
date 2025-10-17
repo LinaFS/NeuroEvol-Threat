@@ -14,7 +14,7 @@ labels_train = os.path.join(dataset_path, 'labels/train')
 os.makedirs(images_train, exist_ok=True)
 os.makedirs(labels_train, exist_ok=True)
 
-class_map = {'Arma': 0}
+class_map = {'sospecha': 0}
 annotations = {}
 
 print("Leyendo archivo CSV...")
