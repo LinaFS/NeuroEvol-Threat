@@ -96,7 +96,7 @@ def extraer_frames_de_video(video_path, output_base, frame_interval=10):
     
     return saved_count, frame_count
 
-def procesar_videos(frame_interval=10):
+def procesar_videos(frame_interval=5):
     """
     Función principal que permite seleccionar un video o directorio
     
