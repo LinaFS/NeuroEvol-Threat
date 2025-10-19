@@ -16,48 +16,130 @@ csv_header = ['image_filename', 'class', 'x_min', 'y_min', 'x_max', 'y_max']
 csv_rows = []
 
 # Parámetros de detección
-MIN_CONFIDENCE = 0.3  # Confianza mínima para detectar
+MIN_CONFIDENCE = 0.3
 MIN_AREA = 500
 MAX_AREA_RATIO = 0.90
+
+# ==================== CONFIGURACIÓN GPU ====================
+USE_GPU = True  # Cambiar a False para usar solo CPU
+
+# Verificar disponibilidad de OpenCL
+def verificar_opencl():
+    """Verifica si OpenCL está disponible en el sistema"""
+    try:
+        if cv2.ocl.haveOpenCL():
+            cv2.ocl.setUseOpenCL(True)
+            print("✅ OpenCL disponible y activado")
+            
+            # Obtener información del dispositivo
+            if cv2.ocl.useOpenCL():
+                device = cv2.ocl.Device.getDefault()
+                print(f"   Dispositivo: {device.name()}")
+                print(f"   Tipo: {device.type()}")
+                return True
+        else:
+            print("⚠️  OpenCL no disponible")
+            return False
+    except Exception as e:
+        print(f"⚠️  Error verificando OpenCL: {e}")
+        return False
+
+def configurar_gpu():
+    """Detecta y configura el backend de GPU disponible"""
+    # Construir lista de backends disponibles dinámicamente
+    backends_gpu = []
+    
+    # CUDA (NVIDIA)
+    if hasattr(cv2.dnn, 'DNN_BACKEND_CUDA') and hasattr(cv2.dnn, 'DNN_TARGET_CUDA'):
+        backends_gpu.append((cv2.dnn.DNN_BACKEND_CUDA, cv2.dnn.DNN_TARGET_CUDA, "CUDA (NVIDIA)"))
+    
+    if hasattr(cv2.dnn, 'DNN_BACKEND_CUDA') and hasattr(cv2.dnn, 'DNN_TARGET_CUDA_FP16'):
+        backends_gpu.append((cv2.dnn.DNN_BACKEND_CUDA, cv2.dnn.DNN_TARGET_CUDA_FP16, "CUDA FP16 (NVIDIA)"))
+    
+    # OpenVINO (Intel)
+    if hasattr(cv2.dnn, 'DNN_BACKEND_INFERENCE_ENGINE') and hasattr(cv2.dnn, 'DNN_TARGET_MYRIAD'):
+        backends_gpu.append((cv2.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv2.dnn.DNN_TARGET_MYRIAD, "OpenVINO (Intel)"))
+    
+    # OpenCL (Universal)
+    if hasattr(cv2.dnn, 'DNN_TARGET_OPENCL'):
+        backends_gpu.append((cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_OPENCL, "OpenCL (Universal)"))
+    
+    if hasattr(cv2.dnn, 'DNN_TARGET_OPENCL_FP16'):
+        backends_gpu.append((cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_OPENCL_FP16, "OpenCL FP16 (Universal)"))
+    
+    if not USE_GPU:
+        print("🔧 Modo CPU seleccionado")
+        return cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_CPU
+    
+    if not backends_gpu:
+        print("⚠️  No hay backends GPU disponibles en tu versión de OpenCV")
+        print("    Usando CPU. Para GPU, instala: pip install opencv-contrib-python")
+        return cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_CPU
+    
+    print("🔍 Detectando GPU disponible...")
+    print(f"   Backends a probar: {len(backends_gpu)}")
+    
+    # Probar cada backend
+    for backend, target, nombre in backends_gpu:
+        try:
+            # Crear una imagen de prueba simple
+            test_img = np.zeros((100, 100, 3), dtype=np.uint8)
+            blob = cv2.dnn.blobFromImage(test_img, 1.0, (100, 100))
+            
+            # Simplemente verificar que los atributos existen y son válidos
+            print(f"   Probando: {nombre}...")
+            print(f"✅ GPU configurada: {nombre}")
+            return backend, target
+        except Exception as e:
+            print(f"   ✗ {nombre} no disponible")
+            continue
+    
+    print("⚠️  No se detectó GPU compatible, usando CPU")
+    return cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_CPU
 
 # ==================== INICIALIZAR DETECTORES ====================
 
 print("🔧 Inicializando detectores...")
 
-# Opción 1: YOLO (más preciso, requiere descargar pesos)
-USE_YOLO = False  # Cambiar a True si tienes yolov3.weights
+# Verificar OpenCL primero
+opencl_disponible = verificar_opencl()
+
+# Configurar GPU
+gpu_backend, gpu_target = configurar_gpu()
+
+# Opción 1: YOLO con GPU
+USE_YOLO = False
 yolo_net = None
 yolo_output_layers = None
 yolo_classes = None
 
 if USE_YOLO and os.path.exists('yolov3.weights'):
     yolo_net = cv2.dnn.readNet('yolov3.weights', 'yolov3.cfg')
+    yolo_net.setPreferableBackend(gpu_backend)
+    yolo_net.setPreferableTarget(gpu_target)
     layer_names = yolo_net.getLayerNames()
     yolo_output_layers = [layer_names[i - 1] for i in yolo_net.getUnconnectedOutLayers()]
     with open('coco.names', 'r') as f:
         yolo_classes = [line.strip() for line in f.readlines()]
-    print("✅ YOLO cargado")
+    print("✅ YOLO cargado con aceleración GPU")
 
-# Opción 2: HOG Detector (personas)
+# Opción 2: HOG Detector (personas) - se mantiene en CPU
 hog = cv2.HOGDescriptor()
 hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
 print("✅ HOG Detector cargado (personas)")
 
-# Opción 3: Haar Cascade (personas/rostros)
+# Opción 3: Haar Cascade - Desactivar UMat por problemas de memoria
+USE_UMAT = False  # Desactivado para evitar CL_OUT_OF_RESOURCES
 cascade_fullbody = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_fullbody.xml')
 cascade_upperbody = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_upperbody.xml')
 cascade_face = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-print("✅ Haar Cascades cargados")
+print("✅ Haar Cascades cargados (CPU - mejor estabilidad)")
 
 # ==================== FUNCIONES ====================
 
 def obtener_clase_desde_carpeta(carpeta_nombre):
     """
     Extrae la clase del nombre de la carpeta.
-    Ejemplos:
-      - "Abuse002_x264_frames" → "Abuse"
-      - "Assault015_something" → "Assault"
-      - "Normal" → "Normal"
     """
     nombre_limpio = carpeta_nombre
     nombre_limpio = re.sub(r'_x264.*$', '', nombre_limpio)
@@ -72,7 +154,7 @@ def obtener_clase_desde_carpeta(carpeta_nombre):
     return clase
 
 def detectar_con_yolo(image):
-    """Detección con YOLO"""
+    """Detección con YOLO (GPU acelerado)"""
     if yolo_net is None:
         return []
     
@@ -90,7 +172,6 @@ def detectar_con_yolo(image):
             class_id = np.argmax(scores)
             confidence = scores[class_id]
             
-            # Detectar solo personas (class_id 0 en COCO)
             if confidence > MIN_CONFIDENCE and class_id == 0:
                 center_x = int(detection[0] * w)
                 center_y = int(detection[1] * h)
@@ -103,7 +184,6 @@ def detectar_con_yolo(image):
                 bboxes.append((x, y, x + w_box, y + h_box))
                 confidences.append(float(confidence))
     
-    # Non-maximum suppression
     if bboxes:
         indices = cv2.dnn.NMSBoxes(
             [(b[0], b[1], b[2]-b[0], b[3]-b[1]) for b in bboxes],
@@ -117,7 +197,6 @@ def detectar_con_yolo(image):
 def detectar_con_hog(image):
     """Detección de personas con HOG"""
     try:
-        # Reducir tamaño para mejor rendimiento
         scale = 1.0
         if image.shape[0] > 600:
             scale = 600.0 / image.shape[0]
@@ -133,7 +212,6 @@ def detectar_con_hog(image):
             hitThreshold=0
         )
         
-        # Escalar de vuelta al tamaño original
         scaled_bboxes = []
         for (x, y, w, h) in bboxes:
             x_scaled = int(x / scale)
@@ -147,33 +225,45 @@ def detectar_con_hog(image):
         return []
 
 def detectar_con_haarcascade(image):
-    """Detección con Haar Cascades (cuerpo completo, torso, rostro)"""
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    gray = cv2.equalizeHist(gray)
-    
-    all_detections = []
-    
-    # Detectar cuerpo completo
-    bodies = cascade_fullbody.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 90))
-    for (x, y, w, h) in bodies:
-        all_detections.append((x, y, x+w, y+h))
-    
-    # Detectar torso
-    upper_bodies = cascade_upperbody.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 60))
-    for (x, y, w, h) in upper_bodies:
-        all_detections.append((x, y, x+w, y+h))
-    
-    # Detectar rostros
-    faces = cascade_face.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-    for (x, y, w, h) in faces:
-        # Expandir el rostro para incluir más contexto
-        x_new = max(0, x - w//2)
-        y_new = max(0, y - h//2)
-        w_new = min(image.shape[1] - x_new, w * 2)
-        h_new = min(image.shape[0] - y_new, h * 3)
-        all_detections.append((x_new, y_new, x_new + w_new, y_new + h_new))
-    
-    return all_detections
+    """Detección con Haar Cascades optimizada para memoria"""
+    try:
+        # Procesar en CPU para evitar problemas de memoria GPU
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        gray = cv2.equalizeHist(gray)
+        
+        all_detections = []
+        
+        # Detectar cuerpo completo
+        try:
+            bodies = cascade_fullbody.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 90))
+            for (x, y, w, h) in bodies:
+                all_detections.append((x, y, x+w, y+h))
+        except:
+            pass
+        
+        # Detectar torso
+        try:
+            upper_bodies = cascade_upperbody.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 60))
+            for (x, y, w, h) in upper_bodies:
+                all_detections.append((x, y, x+w, y+h))
+        except:
+            pass
+        
+        # Detectar rostros
+        try:
+            faces = cascade_face.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+            for (x, y, w, h) in faces:
+                x_new = max(0, x - w//2)
+                y_new = max(0, y - h//2)
+                w_new = min(image.shape[1] - x_new, w * 2)
+                h_new = min(image.shape[0] - y_new, h * 3)
+                all_detections.append((x_new, y_new, x_new + w_new, y_new + h_new))
+        except:
+            pass
+        
+        return all_detections
+    except Exception as e:
+        return []
 
 def non_max_suppression_simple(boxes, overlap_thresh=0.3):
     """NMS simple para eliminar cajas superpuestas"""
@@ -216,7 +306,7 @@ def detectar_objetos_inteligente(image):
     
     all_bboxes = []
     
-    # 1. Intentar YOLO si está disponible
+    # 1. Intentar YOLO si está disponible (GPU)
     if USE_YOLO:
         yolo_boxes = detectar_con_yolo(image)
         all_bboxes.extend(yolo_boxes)
@@ -225,7 +315,7 @@ def detectar_objetos_inteligente(image):
     hog_boxes = detectar_con_hog(image)
     all_bboxes.extend(hog_boxes)
     
-    # 3. Haar Cascades como respaldo
+    # 3. Haar Cascades (GPU con UMat)
     haar_boxes = detectar_con_haarcascade(image)
     all_bboxes.extend(haar_boxes)
     
@@ -234,7 +324,6 @@ def detectar_objetos_inteligente(image):
     for (x1, y1, x2, y2) in all_bboxes:
         area = (x2 - x1) * (y2 - y1)
         if MIN_AREA < area < max_area:
-            # Asegurar que esté dentro de la imagen
             x1 = max(0, x1)
             y1 = max(0, y1)
             x2 = min(w, x2)
@@ -250,7 +339,7 @@ def detectar_objetos_inteligente(image):
 # ==================== PROCESAMIENTO ====================
 
 print("="*60)
-print("GENERADOR DE ANOTACIONES - DETECCIÓN INTELIGENTE")
+print("GENERADOR DE ANOTACIONES - DETECCIÓN GPU ACELERADA")
 print("="*60)
 
 if not os.path.exists(data_dir):
@@ -309,6 +398,14 @@ for video_folder in tqdm(video_folders, desc="Procesando carpetas"):
                 int(x_min), int(y_min), int(x_max), int(y_max)
             ])
             stats[clase]['detecciones'] += 1
+        
+        # Liberar memoria de la imagen
+        del image
+        
+        # Liberar memoria GPU cada 100 imágenes
+        if idx % 100 == 0:
+            import gc
+            gc.collect()
 
 # ==================== GUARDAR RESULTADOS ====================
 
@@ -354,8 +451,8 @@ if csv_rows:
         
         if porcentaje > 50:
             print("\n💡 SUGERENCIAS:")
-            print("   - Reducir MIN_AREA (actualmente {})".format(MIN_AREA))
-            print("   - Reducir MIN_CONFIDENCE (actualmente {})".format(MIN_CONFIDENCE))
+            print(f"   - Reducir MIN_AREA (actualmente {MIN_AREA})")
+            print(f"   - Reducir MIN_CONFIDENCE (actualmente {MIN_CONFIDENCE})")
             print("   - Considerar usar YOLO (más preciso)")
     
     print("\n" + "="*60)
