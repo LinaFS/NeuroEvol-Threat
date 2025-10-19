@@ -23,75 +23,40 @@ MAX_AREA_RATIO = 0.90
 # ==================== CONFIGURACIÓN GPU ====================
 USE_GPU = True  # Cambiar a False para usar solo CPU
 
-# Verificar disponibilidad de OpenCL
-def verificar_opencl():
-    """Verifica si OpenCL está disponible en el sistema"""
-    try:
-        if cv2.ocl.haveOpenCL():
-            cv2.ocl.setUseOpenCL(True)
-            print("✅ OpenCL disponible y activado")
-            
-            # Obtener información del dispositivo
-            if cv2.ocl.useOpenCL():
-                device = cv2.ocl.Device.getDefault()
-                print(f"   Dispositivo: {device.name()}")
-                print(f"   Tipo: {device.type()}")
-                return True
-        else:
-            print("⚠️  OpenCL no disponible")
-            return False
-    except Exception as e:
-        print(f"⚠️  Error verificando OpenCL: {e}")
-        return False
-
 def configurar_gpu():
     """Detecta y configura el backend de GPU disponible"""
-    # Construir lista de backends disponibles dinámicamente
-    backends_gpu = []
-    
-    # CUDA (NVIDIA)
-    if hasattr(cv2.dnn, 'DNN_BACKEND_CUDA') and hasattr(cv2.dnn, 'DNN_TARGET_CUDA'):
-        backends_gpu.append((cv2.dnn.DNN_BACKEND_CUDA, cv2.dnn.DNN_TARGET_CUDA, "CUDA (NVIDIA)"))
-    
-    if hasattr(cv2.dnn, 'DNN_BACKEND_CUDA') and hasattr(cv2.dnn, 'DNN_TARGET_CUDA_FP16'):
-        backends_gpu.append((cv2.dnn.DNN_BACKEND_CUDA, cv2.dnn.DNN_TARGET_CUDA_FP16, "CUDA FP16 (NVIDIA)"))
-    
-    # OpenVINO (Intel)
-    if hasattr(cv2.dnn, 'DNN_BACKEND_INFERENCE_ENGINE') and hasattr(cv2.dnn, 'DNN_TARGET_MYRIAD'):
-        backends_gpu.append((cv2.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv2.dnn.DNN_TARGET_MYRIAD, "OpenVINO (Intel)"))
-    
-    # OpenCL (Universal)
-    if hasattr(cv2.dnn, 'DNN_TARGET_OPENCL'):
-        backends_gpu.append((cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_OPENCL, "OpenCL (Universal)"))
-    
-    if hasattr(cv2.dnn, 'DNN_TARGET_OPENCL_FP16'):
-        backends_gpu.append((cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_OPENCL_FP16, "OpenCL FP16 (Universal)"))
+    backends_gpu = [
+        (cv2.dnn.DNN_BACKEND_CUDA, cv2.dnn.DNN_TARGET_CUDA, "CUDA (NVIDIA)"),
+        (cv2.dnn.DNN_BACKEND_CUDA, cv2.dnn.DNN_TARGET_CUDA_FP16, "CUDA FP16 (NVIDIA)"),
+        (cv2.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv2.dnn.DNN_TARGET_GPU, "OpenVINO (Intel)"),
+        (cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_OPENCL, "OpenCL (Universal)"),
+    ]
     
     if not USE_GPU:
         print("🔧 Modo CPU seleccionado")
         return cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_CPU
     
-    if not backends_gpu:
-        print("⚠️  No hay backends GPU disponibles en tu versión de OpenCV")
-        print("    Usando CPU. Para GPU, instala: pip install opencv-contrib-python")
-        return cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_CPU
-    
     print("🔍 Detectando GPU disponible...")
-    print(f"   Backends a probar: {len(backends_gpu)}")
     
     # Probar cada backend
     for backend, target, nombre in backends_gpu:
         try:
-            # Crear una imagen de prueba simple
-            test_img = np.zeros((100, 100, 3), dtype=np.uint8)
-            blob = cv2.dnn.blobFromImage(test_img, 1.0, (100, 100))
+            # Crear una red temporal para probar
+            net_test = cv2.dnn.readNetFromCaffe(
+                cv2.samples.findFile('face_detector/deploy.prototxt'),
+                cv2.samples.findFile('face_detector/res10_300x300_ssd_iter_140000.caffemodel')
+            )
+            net_test.setPreferableBackend(backend)
+            net_test.setPreferableTarget(target)
             
-            # Simplemente verificar que los atributos existen y son válidos
-            print(f"   Probando: {nombre}...")
-            print(f"✅ GPU configurada: {nombre}")
+            # Probar una inferencia pequeña
+            blob = cv2.dnn.blobFromImage(np.zeros((300, 300, 3), dtype=np.uint8))
+            net_test.setInput(blob)
+            net_test.forward()
+            
+            print(f"✅ GPU detectada: {nombre}")
             return backend, target
-        except Exception as e:
-            print(f"   ✗ {nombre} no disponible")
+        except:
             continue
     
     print("⚠️  No se detectó GPU compatible, usando CPU")
@@ -100,9 +65,6 @@ def configurar_gpu():
 # ==================== INICIALIZAR DETECTORES ====================
 
 print("🔧 Inicializando detectores...")
-
-# Verificar OpenCL primero
-opencl_disponible = verificar_opencl()
 
 # Configurar GPU
 gpu_backend, gpu_target = configurar_gpu()
@@ -128,12 +90,12 @@ hog = cv2.HOGDescriptor()
 hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
 print("✅ HOG Detector cargado (personas)")
 
-# Opción 3: Haar Cascade - Desactivar UMat por problemas de memoria
-USE_UMAT = False  # Desactivado para evitar CL_OUT_OF_RESOURCES
+# Opción 3: Haar Cascade - aceleración mediante UMat
+USE_UMAT = True and USE_GPU  # Usar UMat si GPU está disponible
 cascade_fullbody = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_fullbody.xml')
 cascade_upperbody = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_upperbody.xml')
 cascade_face = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-print("✅ Haar Cascades cargados (CPU - mejor estabilidad)")
+print("✅ Haar Cascades cargados" + (" con UMat (GPU)" if USE_UMAT else ""))
 
 # ==================== FUNCIONES ====================
 
@@ -225,45 +187,38 @@ def detectar_con_hog(image):
         return []
 
 def detectar_con_haarcascade(image):
-    """Detección con Haar Cascades optimizada para memoria"""
-    try:
-        # Procesar en CPU para evitar problemas de memoria GPU
+    """Detección con Haar Cascades (GPU acelerado con UMat)"""
+    # Convertir a UMat para procesamiento GPU si está disponible
+    if USE_UMAT:
+        img_umat = cv2.UMat(image)
+        gray = cv2.cvtColor(img_umat, cv2.COLOR_BGR2GRAY)
+        gray = cv2.equalizeHist(gray)
+    else:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         gray = cv2.equalizeHist(gray)
-        
-        all_detections = []
-        
-        # Detectar cuerpo completo
-        try:
-            bodies = cascade_fullbody.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 90))
-            for (x, y, w, h) in bodies:
-                all_detections.append((x, y, x+w, y+h))
-        except:
-            pass
-        
-        # Detectar torso
-        try:
-            upper_bodies = cascade_upperbody.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 60))
-            for (x, y, w, h) in upper_bodies:
-                all_detections.append((x, y, x+w, y+h))
-        except:
-            pass
-        
-        # Detectar rostros
-        try:
-            faces = cascade_face.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-            for (x, y, w, h) in faces:
-                x_new = max(0, x - w//2)
-                y_new = max(0, y - h//2)
-                w_new = min(image.shape[1] - x_new, w * 2)
-                h_new = min(image.shape[0] - y_new, h * 3)
-                all_detections.append((x_new, y_new, x_new + w_new, y_new + h_new))
-        except:
-            pass
-        
-        return all_detections
-    except Exception as e:
-        return []
+    
+    all_detections = []
+    
+    # Detectar cuerpo completo
+    bodies = cascade_fullbody.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 90))
+    for (x, y, w, h) in bodies:
+        all_detections.append((x, y, x+w, y+h))
+    
+    # Detectar torso
+    upper_bodies = cascade_upperbody.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 60))
+    for (x, y, w, h) in upper_bodies:
+        all_detections.append((x, y, x+w, y+h))
+    
+    # Detectar rostros
+    faces = cascade_face.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+    for (x, y, w, h) in faces:
+        x_new = max(0, x - w//2)
+        y_new = max(0, y - h//2)
+        w_new = min(image.shape[1] - x_new, w * 2)
+        h_new = min(image.shape[0] - y_new, h * 3)
+        all_detections.append((x_new, y_new, x_new + w_new, y_new + h_new))
+    
+    return all_detections
 
 def non_max_suppression_simple(boxes, overlap_thresh=0.3):
     """NMS simple para eliminar cajas superpuestas"""
@@ -398,14 +353,6 @@ for video_folder in tqdm(video_folders, desc="Procesando carpetas"):
                 int(x_min), int(y_min), int(x_max), int(y_max)
             ])
             stats[clase]['detecciones'] += 1
-        
-        # Liberar memoria de la imagen
-        del image
-        
-        # Liberar memoria GPU cada 100 imágenes
-        if idx % 100 == 0:
-            import gc
-            gc.collect()
 
 # ==================== GUARDAR RESULTADOS ====================
 
