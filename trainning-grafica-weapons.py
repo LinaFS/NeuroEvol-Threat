@@ -1,462 +1,186 @@
-import cv2
 import os
 import csv
-import numpy as np
-import re
+import cv2
+from shutil import copy2
 from tqdm import tqdm
-from collections import defaultdict
+from time import time
 
-# ==================== CONFIGURACIÓN ====================
-data_dir = 'dataArmas'  # Carpeta con subcarpetas de imágenes por clase
-output_root = os.path.join('', 'resultados')
-os.makedirs(output_root, exist_ok=True)
+csv_path = 'resultados/anotaciones_corregido.csv'
+images_src = 'dataSospecha'
+dataset_path = 'datasetSospecha'
 
-annotations_path = os.path.join(output_root, 'anotaciones.csv')
-csv_header = ['image_filename', 'class', 'x_min', 'y_min', 'x_max', 'y_max']
-csv_rows = []
+images_train = os.path.join(dataset_path, 'images/train')
+labels_train = os.path.join(dataset_path, 'labels/train')
+os.makedirs(images_train, exist_ok=True)
+os.makedirs(labels_train, exist_ok=True)
 
-# Parámetros de detección
-MIN_CONFIDENCE = 0.3
-MIN_AREA = 500
-MAX_AREA_RATIO = 0.90
+annotations = {}
+errores = []
 
-# ==================== CONFIGURACIÓN GPU ====================
-USE_GPU = True  # Cambiar a False para usar solo CPU
+print("Leyendo archivo CSV y extrayendo clases...")
 
-# Verificar disponibilidad de OpenCL
-def verificar_opencl():
-    """Verifica si OpenCL está disponible en el sistema"""
+# Leer CSV
+with open(csv_path, newline='', encoding='utf-8') as f:
+    reader = csv.DictReader(f)
+    rows = list(reader)
+
+# Extraer clases únicas
+clases_unicas = sorted(set(row['class'] for row in rows if row.get('class')))
+class_map = {clase: idx for idx, clase in enumerate(clases_unicas)}
+
+print(f"\nClases detectadas ({len(class_map)}):")
+for clase, idx in class_map.items():
+    print(f"  {idx}: {clase}")
+
+print(f"\nTotal de anotaciones: {len(rows)}")
+
+# Crear índice de carpetas disponibles
+print("\nIndexando carpetas disponibles...")
+carpetas_disponibles = {}
+for item in os.listdir(images_src):
+    item_path = os.path.join(images_src, item)
+    if os.path.isdir(item_path):
+        carpetas_disponibles[item] = item_path
+
+print(f"✓ Se encontraron {len(carpetas_disponibles)} carpetas")
+
+imagenes_no_encontradas = set()
+
+for row in tqdm(rows, desc="Procesando anotaciones CSV"):
     try:
-        if cv2.ocl.haveOpenCL():
-            cv2.ocl.setUseOpenCL(True)
-            print("✅ OpenCL disponible y activado")
-            
-            # Obtener información del dispositivo
-            if cv2.ocl.useOpenCL():
-                device = cv2.ocl.Device.getDefault()
-                print(f"   Dispositivo: {device.name()}")
-                print(f"   Tipo: {device.type()}")
-                return True
-        else:
-            print("⚠️  OpenCL no disponible")
-            return False
-    except Exception as e:
-        print(f"⚠️  Error verificando OpenCL: {e}")
-        return False
-
-def configurar_gpu():
-    """Detecta y configura el backend de GPU disponible"""
-    # Construir lista de backends disponibles dinámicamente
-    backends_gpu = []
-    
-    # CUDA (NVIDIA)
-    if hasattr(cv2.dnn, 'DNN_BACKEND_CUDA') and hasattr(cv2.dnn, 'DNN_TARGET_CUDA'):
-        backends_gpu.append((cv2.dnn.DNN_BACKEND_CUDA, cv2.dnn.DNN_TARGET_CUDA, "CUDA (NVIDIA)"))
-    
-    if hasattr(cv2.dnn, 'DNN_BACKEND_CUDA') and hasattr(cv2.dnn, 'DNN_TARGET_CUDA_FP16'):
-        backends_gpu.append((cv2.dnn.DNN_BACKEND_CUDA, cv2.dnn.DNN_TARGET_CUDA_FP16, "CUDA FP16 (NVIDIA)"))
-    
-    # OpenVINO (Intel)
-    if hasattr(cv2.dnn, 'DNN_BACKEND_INFERENCE_ENGINE') and hasattr(cv2.dnn, 'DNN_TARGET_MYRIAD'):
-        backends_gpu.append((cv2.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv2.dnn.DNN_TARGET_MYRIAD, "OpenVINO (Intel)"))
-    
-    # OpenCL (Universal)
-    if hasattr(cv2.dnn, 'DNN_TARGET_OPENCL'):
-        backends_gpu.append((cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_OPENCL, "OpenCL (Universal)"))
-    
-    if hasattr(cv2.dnn, 'DNN_TARGET_OPENCL_FP16'):
-        backends_gpu.append((cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_OPENCL_FP16, "OpenCL FP16 (Universal)"))
-    
-    if not USE_GPU:
-        print("🔧 Modo CPU seleccionado")
-        return cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_CPU
-    
-    if not backends_gpu:
-        print("⚠️  No hay backends GPU disponibles en tu versión de OpenCV")
-        print("    Usando CPU. Para GPU, instala: pip install opencv-contrib-python")
-        return cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_CPU
-    
-    print("🔍 Detectando GPU disponible...")
-    print(f"   Backends a probar: {len(backends_gpu)}")
-    
-    # Probar cada backend
-    for backend, target, nombre in backends_gpu:
-        try:
-            # Crear una imagen de prueba simple
-            test_img = np.zeros((100, 100, 3), dtype=np.uint8)
-            blob = cv2.dnn.blobFromImage(test_img, 1.0, (100, 100))
-            
-            # Simplemente verificar que los atributos existen y son válidos
-            print(f"   Probando: {nombre}...")
-            print(f"✅ GPU configurada: {nombre}")
-            return backend, target
-        except Exception as e:
-            print(f"   ✗ {nombre} no disponible")
+        start = time()
+        csv_filename = row['image_filename']  # ej: Abuse001_x264_frames_0001.jpg
+        cls = row['class']
+        
+        # Obtener class_id
+        class_id = class_map.get(cls)
+        if class_id is None:
+            print(f"[!] Clase desconocida '{cls}' en imagen {csv_filename}")
+            errores.append(f"{csv_filename} (clase desconocida: {cls})")
             continue
-    
-    print("⚠️  No se detectó GPU compatible, usando CPU")
-    return cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_CPU
 
-# ==================== INICIALIZAR DETECTORES ====================
-
-print("🔧 Inicializando detectores...")
-
-# Verificar OpenCL primero
-opencl_disponible = verificar_opencl()
-
-# Configurar GPU
-gpu_backend, gpu_target = configurar_gpu()
-
-# Opción 1: YOLO con GPU
-USE_YOLO = False
-yolo_net = None
-yolo_output_layers = None
-yolo_classes = None
-
-if USE_YOLO and os.path.exists('yolov3.weights'):
-    yolo_net = cv2.dnn.readNet('yolov3.weights', 'yolov3.cfg')
-    yolo_net.setPreferableBackend(gpu_backend)
-    yolo_net.setPreferableTarget(gpu_target)
-    layer_names = yolo_net.getLayerNames()
-    yolo_output_layers = [layer_names[i - 1] for i in yolo_net.getUnconnectedOutLayers()]
-    with open('coco.names', 'r') as f:
-        yolo_classes = [line.strip() for line in f.readlines()]
-    print("✅ YOLO cargado con aceleración GPU")
-
-# Opción 2: HOG Detector (personas) - se mantiene en CPU
-hog = cv2.HOGDescriptor()
-hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-print("✅ HOG Detector cargado (personas)")
-
-# Opción 3: Haar Cascade - Desactivar UMat por problemas de memoria
-USE_UMAT = False  # Desactivado para evitar CL_OUT_OF_RESOURCES
-cascade_fullbody = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_fullbody.xml')
-cascade_upperbody = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_upperbody.xml')
-cascade_face = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-print("✅ Haar Cascades cargados (CPU - mejor estabilidad)")
-
-# ==================== FUNCIONES ====================
-
-def obtener_clase_desde_carpeta(carpeta_nombre):
-    """
-    Extrae la clase del nombre de la carpeta.
-    """
-    nombre_limpio = carpeta_nombre
-    nombre_limpio = re.sub(r'_x264.*$', '', nombre_limpio)
-    nombre_limpio = re.sub(r'_frames.*$', '', nombre_limpio)
-    nombre_limpio = re.sub(r'_video.*$', '', nombre_limpio)
-    
-    clase = re.sub(r'\d+$', '', nombre_limpio)
-    
-    if not clase:
-        clase = carpeta_nombre
-    
-    return clase
-
-def detectar_con_yolo(image):
-    """Detección con YOLO (GPU acelerado)"""
-    if yolo_net is None:
-        return []
-    
-    h, w = image.shape[:2]
-    blob = cv2.dnn.blobFromImage(image, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
-    yolo_net.setInput(blob)
-    outs = yolo_net.forward(yolo_output_layers)
-    
-    bboxes = []
-    confidences = []
-    
-    for out in outs:
-        for detection in out:
-            scores = detection[5:]
-            class_id = np.argmax(scores)
-            confidence = scores[class_id]
-            
-            if confidence > MIN_CONFIDENCE and class_id == 0:
-                center_x = int(detection[0] * w)
-                center_y = int(detection[1] * h)
-                w_box = int(detection[2] * w)
-                h_box = int(detection[3] * h)
-                
-                x = int(center_x - w_box / 2)
-                y = int(center_y - h_box / 2)
-                
-                bboxes.append((x, y, x + w_box, y + h_box))
-                confidences.append(float(confidence))
-    
-    if bboxes:
-        indices = cv2.dnn.NMSBoxes(
-            [(b[0], b[1], b[2]-b[0], b[3]-b[1]) for b in bboxes],
-            confidences, MIN_CONFIDENCE, 0.4
-        )
-        if len(indices) > 0:
-            bboxes = [bboxes[i] for i in indices.flatten()]
-    
-    return bboxes
-
-def detectar_con_hog(image):
-    """Detección de personas con HOG"""
-    try:
-        scale = 1.0
-        if image.shape[0] > 600:
-            scale = 600.0 / image.shape[0]
-            image_resized = cv2.resize(image, None, fx=scale, fy=scale)
-        else:
-            image_resized = image
+        # Extraer el nombre de la carpeta del nombre del CSV
+        # Formato: "NombreCarpeta_####.ext" → extraer "NombreCarpeta"
+        nombre_base = csv_filename.rsplit('_', 1)[0]  # Quita el último "_####"
         
-        bboxes, weights = hog.detectMultiScale(
-            image_resized, 
-            winStride=(4, 4),
-            padding=(8, 8),
-            scale=1.05,
-            hitThreshold=0
-        )
-        
-        scaled_bboxes = []
-        for (x, y, w, h) in bboxes:
-            x_scaled = int(x / scale)
-            y_scaled = int(y / scale)
-            w_scaled = int(w / scale)
-            h_scaled = int(h / scale)
-            scaled_bboxes.append((x_scaled, y_scaled, x_scaled + w_scaled, y_scaled + h_scaled))
-        
-        return scaled_bboxes
-    except Exception as e:
-        return []
-
-def detectar_con_haarcascade(image):
-    """Detección con Haar Cascades optimizada para memoria"""
-    try:
-        # Procesar en CPU para evitar problemas de memoria GPU
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        gray = cv2.equalizeHist(gray)
-        
-        all_detections = []
-        
-        # Detectar cuerpo completo
-        try:
-            bodies = cascade_fullbody.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 90))
-            for (x, y, w, h) in bodies:
-                all_detections.append((x, y, x+w, y+h))
-        except:
-            pass
-        
-        # Detectar torso
-        try:
-            upper_bodies = cascade_upperbody.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 60))
-            for (x, y, w, h) in upper_bodies:
-                all_detections.append((x, y, x+w, y+h))
-        except:
-            pass
-        
-        # Detectar rostros
-        try:
-            faces = cascade_face.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-            for (x, y, w, h) in faces:
-                x_new = max(0, x - w//2)
-                y_new = max(0, y - h//2)
-                w_new = min(image.shape[1] - x_new, w * 2)
-                h_new = min(image.shape[0] - y_new, h * 3)
-                all_detections.append((x_new, y_new, x_new + w_new, y_new + h_new))
-        except:
-            pass
-        
-        return all_detections
-    except Exception as e:
-        return []
-
-def non_max_suppression_simple(boxes, overlap_thresh=0.3):
-    """NMS simple para eliminar cajas superpuestas"""
-    if len(boxes) == 0:
-        return []
-    
-    boxes = np.array(boxes, dtype=np.float32)
-    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-    
-    area = (x2 - x1 + 1) * (y2 - y1 + 1)
-    idxs = np.argsort(y2)
-    
-    pick = []
-    while len(idxs) > 0:
-        last = len(idxs) - 1
-        i = idxs[last]
-        pick.append(i)
-        
-        xx1 = np.maximum(x1[i], x1[idxs[:last]])
-        yy1 = np.maximum(y1[i], y1[idxs[:last]])
-        xx2 = np.minimum(x2[i], x2[idxs[:last]])
-        yy2 = np.minimum(y2[i], y2[idxs[:last]])
-        
-        w = np.maximum(0, xx2 - xx1 + 1)
-        h = np.maximum(0, yy2 - yy1 + 1)
-        
-        overlap = (w * h) / area[idxs[:last]]
-        
-        idxs = np.delete(idxs, np.concatenate(([last], np.where(overlap > overlap_thresh)[0])))
-    
-    return [tuple(map(int, boxes[i])) for i in pick]
-
-def detectar_objetos_inteligente(image):
-    """
-    Combina múltiples detectores para máxima cobertura
-    """
-    h, w = image.shape[:2]
-    img_area = h * w
-    max_area = img_area * MAX_AREA_RATIO
-    
-    all_bboxes = []
-    
-    # 1. Intentar YOLO si está disponible (GPU)
-    if USE_YOLO:
-        yolo_boxes = detectar_con_yolo(image)
-        all_bboxes.extend(yolo_boxes)
-    
-    # 2. HOG para personas
-    hog_boxes = detectar_con_hog(image)
-    all_bboxes.extend(hog_boxes)
-    
-    # 3. Haar Cascades (GPU con UMat)
-    haar_boxes = detectar_con_haarcascade(image)
-    all_bboxes.extend(haar_boxes)
-    
-    # Filtrar por área
-    valid_boxes = []
-    for (x1, y1, x2, y2) in all_bboxes:
-        area = (x2 - x1) * (y2 - y1)
-        if MIN_AREA < area < max_area:
-            x1 = max(0, x1)
-            y1 = max(0, y1)
-            x2 = min(w, x2)
-            y2 = min(h, y2)
-            valid_boxes.append((x1, y1, x2, y2))
-    
-    # Eliminar duplicados
-    if valid_boxes:
-        valid_boxes = non_max_suppression_simple(valid_boxes, 0.3)
-    
-    return valid_boxes
-
-# ==================== PROCESAMIENTO ====================
-
-print("="*60)
-print("GENERADOR DE ANOTACIONES - DETECCIÓN GPU ACELERADA")
-print("="*60)
-
-if not os.path.exists(data_dir):
-    print(f"❌ Error: No existe la carpeta '{data_dir}'")
-    exit(1)
-
-video_folders = [d for d in os.listdir(data_dir) 
-                 if os.path.isdir(os.path.join(data_dir, d))]
-
-if not video_folders:
-    print(f"❌ No se encontraron subcarpetas en '{data_dir}'")
-    exit(1)
-
-print(f"\n📁 Carpetas encontradas: {len(video_folders)}")
-print("\n📋 Preview de clases:")
-for vf in sorted(video_folders)[:10]:
-    clase = obtener_clase_desde_carpeta(vf)
-    print(f"  {vf:30s} → {clase}")
-if len(video_folders) > 10:
-    print(f"  ... y {len(video_folders) - 10} más")
-
-# Estadísticas
-stats = defaultdict(lambda: {'imagenes': 0, 'detecciones': 0})
-imagenes_sin_detecciones = []
-
-# Procesar cada carpeta
-for video_folder in tqdm(video_folders, desc="Procesando carpetas"):
-    video_path = os.path.join(data_dir, video_folder)
-    clase = obtener_clase_desde_carpeta(video_folder)
-    
-    image_files = sorted([f for f in os.listdir(video_path) 
-                         if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
-    
-    stats[clase]['imagenes'] += len(image_files)
-    
-    for idx, filename in enumerate(image_files):
-        image_path = os.path.join(video_path, filename)
-        image = cv2.imread(image_path)
-        
-        if image is None:
+        # Buscar la carpeta correspondiente
+        if nombre_base not in carpetas_disponibles:
+            if csv_filename not in imagenes_no_encontradas:
+                imagenes_no_encontradas.add(csv_filename)
             continue
         
-        # Detectar objetos/personas
-        bboxes = detectar_objetos_inteligente(image)
+        carpeta_path = carpetas_disponibles[nombre_base]
         
-        if len(bboxes) == 0:
-            imagenes_sin_detecciones.append(f"{video_folder}/{filename}")
+        # Listar todas las imágenes en esa carpeta
+        imagenes_en_carpeta = sorted([
+            f for f in os.listdir(carpeta_path) 
+            if f.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp'))
+        ])
         
-        file_ext = os.path.splitext(filename)[1]
-        nuevo_nombre = f"{video_folder}_{idx:04d}{file_ext}"
+        if not imagenes_en_carpeta:
+            if csv_filename not in imagenes_no_encontradas:
+                imagenes_no_encontradas.add(csv_filename)
+            continue
         
-        for (x_min, y_min, x_max, y_max) in bboxes:
-            csv_rows.append([
-                nuevo_nombre,
-                clase,
-                int(x_min), int(y_min), int(x_max), int(y_max)
-            ])
-            stats[clase]['detecciones'] += 1
-        
-        # Liberar memoria de la imagen
-        del image
-        
-        # Liberar memoria GPU cada 100 imágenes
-        if idx % 100 == 0:
-            import gc
-            gc.collect()
+        # Extraer el índice del nombre del CSV
+        # Formato: "NombreCarpeta_0001.jpg" → extraer índice 1
+        try:
+            indice_str = csv_filename.rsplit('_', 1)[1].split('.')[0]  # "0001"
+            indice = int(indice_str)
+            
+            # Validar que el índice esté dentro del rango
+            if indice >= len(imagenes_en_carpeta):
+                if csv_filename not in imagenes_no_encontradas:
+                    imagenes_no_encontradas.add(csv_filename)
+                continue
+            
+            # Obtener el nombre real de la imagen en la carpeta
+            nombre_real = imagenes_en_carpeta[indice]
+            img_path = os.path.join(carpeta_path, nombre_real)
+            
+        except (ValueError, IndexError):
+            if csv_filename not in imagenes_no_encontradas:
+                imagenes_no_encontradas.add(csv_filename)
+            continue
 
-# ==================== GUARDAR RESULTADOS ====================
+        # Procesar coordenadas
+        x_min = int(row['x_min'])
+        y_min = int(row['y_min'])
+        x_max = int(row['x_max'])
+        y_max = int(row['y_max'])
 
-if csv_rows:
-    with open(annotations_path, mode='w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(csv_header)
-        writer.writerows(csv_rows)
-    
-    print(f"\n✅ Anotaciones guardadas: {annotations_path}")
-    print(f"\n📊 ESTADÍSTICAS POR CLASE:")
-    print("-" * 70)
-    print(f"  {'CLASE':20s} | {'IMÁGENES':>8s} | {'DETECCIONES':>11s} | {'PROM':>6s}")
-    print("-" * 70)
-    
-    total_imgs = 0
-    total_dets = 0
-    
-    for clase in sorted(stats.keys()):
-        n_imgs = stats[clase]['imagenes']
-        n_dets = stats[clase]['detecciones']
-        avg = n_dets / n_imgs if n_imgs > 0 else 0
+        img = cv2.imread(img_path)
+
+        if img is None:
+            print(f"[!] No se pudo leer la imagen: {img_path}")
+            errores.append(csv_filename)
+            continue
+
+        h, w = img.shape[:2]
+
+        x_center = ((x_min + x_max) / 2) / w
+        y_center = ((y_min + y_max) / 2) / h
+        bbox_w = (x_max - x_min) / w
+        bbox_h = (y_max - y_min) / h
+
+        # Usar el nombre del CSV como key para mantener la referencia
+        if csv_filename not in annotations:
+            annotations[csv_filename] = {'path': img_path, 'boxes': []}
+
+        annotations[csv_filename]['boxes'].append(
+            f"{class_id} {x_center:.6f} {y_center:.6f} {bbox_w:.6f} {bbox_h:.6f}"
+        )
+
+        if time() - start > 2:
+            print(f"[!] Imagen lenta: {csv_filename}")
+
+    except Exception as e:
+        print(f"[ERROR] {row.get('image_filename', 'desconocida')} → {e}")
+        errores.append(row.get('image_filename', 'desconocida'))
+        continue
+
+print("\nGuardando archivos YOLO y copiando imágenes...")
+
+for csv_filename in tqdm(annotations, desc="Copiando imágenes y etiquetas"):
+    try:
+        data = annotations[csv_filename]
+        src_img = data['path']
+        dst_img = os.path.join(images_train, csv_filename)
         
-        print(f"  {clase:20s} | {n_imgs:8d} | {n_dets:11d} | {avg:6.2f}")
-        total_imgs += n_imgs
-        total_dets += n_dets
-    
-    print("-" * 70)
-    avg_total = total_dets/total_imgs if total_imgs > 0 else 0
-    print(f"  {'TOTAL':20s} | {total_imgs:8d} | {total_dets:11d} | {avg_total:6.2f}")
-    
-    if imagenes_sin_detecciones:
-        reporte_path = os.path.join(output_root, 'imagenes_sin_detecciones.txt')
-        with open(reporte_path, 'w', encoding='utf-8') as f:
-            f.write(f"Total: {len(imagenes_sin_detecciones)}\n")
-            f.write("="*60 + "\n")
-            for img in imagenes_sin_detecciones:
-                f.write(f"{img}\n")
-        
-        porcentaje = (len(imagenes_sin_detecciones) / total_imgs) * 100
-        print(f"\n⚠  {len(imagenes_sin_detecciones)} imágenes sin detecciones ({porcentaje:.1f}%)")
-        print(f"    Reporte: {reporte_path}")
-        
-        if porcentaje > 50:
-            print("\n💡 SUGERENCIAS:")
-            print(f"   - Reducir MIN_AREA (actualmente {MIN_AREA})")
-            print(f"   - Reducir MIN_CONFIDENCE (actualmente {MIN_CONFIDENCE})")
-            print("   - Considerar usar YOLO (más preciso)")
-    
-    print("\n" + "="*60)
-    print("✅ PROCESO COMPLETADO")
-    print("="*60)
-else:
-    print("\n❌ No se generaron anotaciones.")
+        if not os.path.exists(dst_img):
+            copy2(src_img, dst_img)
+
+        label_file = os.path.splitext(csv_filename)[0] + '.txt'
+        label_path = os.path.join(labels_train, label_file)
+        with open(label_path, 'w', encoding='utf-8') as f:
+            for annot in data['boxes']:
+                f.write(annot + '\n')
+
+    except Exception as e:
+        print(f"[ERROR guardando {csv_filename}]: {e}")
+        errores.append(csv_filename)
+
+# Guardar archivo de clases
+classes_file = os.path.join(dataset_path, 'classes.txt')
+with open(classes_file, 'w', encoding='utf-8') as f:
+    for clase in clases_unicas:
+        f.write(f"{clase}\n")
+
+print(f"\n✅ ¡Dataset listo para entrenamiento!")
+print(f"📝 Archivo de clases guardado en: {classes_file}")
+print(f"📊 Imágenes procesadas: {len(annotations)}")
+
+if imagenes_no_encontradas:
+    print(f"\n⚠️  Imágenes no encontradas: {len(imagenes_no_encontradas)}")
+    print("Primeras 10:")
+    for img in list(imagenes_no_encontradas)[:10]:
+        print(f" - {img}")
+    if len(imagenes_no_encontradas) > 10:
+        print(f"   ... y {len(imagenes_no_encontradas) - 10} más")
+
+if errores:
+    print(f"\n⚠️  Otros errores: {len(errores)}")
+    for err in errores[:10]:
+        print(f" - {err}")
+    if len(errores) > 10:
+        print(f"   ... y {len(errores) - 10} más")
