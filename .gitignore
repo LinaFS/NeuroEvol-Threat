@@ -1,1 +1,8 @@
+# Ignora la carpeta dataSospecha y todo su contenido
 dataSospecha/
+
+# Ignora la carpeta datasetSospecha y todo su contenido
+datasetSospecha/
+
+# Ignora la carpeta datasetArmas y todo su contenido
+datasetArmas/
