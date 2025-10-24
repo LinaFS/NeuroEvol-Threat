@@ -3,7 +3,7 @@ from ultralytics import YOLO
 def main():
     model = YOLO("yolov8n.pt")
     model.train(
-        data="proyecto/datasetArmas/dataset.yaml",
+        data="SinGrafrica/datasetArmas/dataset.yaml",
         epochs=50,
         imgsz=640,
         batch=4,  # MÁS PEQUEÑO = MENOS CARGA PARA LA GPU
