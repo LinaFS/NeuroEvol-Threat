@@ -5,25 +5,28 @@ import numpy as np
 import re
 from tqdm import tqdm
 from collections import defaultdict
+import gc
 
 # ==================== CONFIGURACIÓN ====================
 data_dir = 'dataArmas'
-output_root = os.path.join('', 'resultados')
+output_root = os.path.join('', 'Resultados')
 os.makedirs(output_root, exist_ok=True)
 
 annotations_path = os.path.join(output_root, 'anotaciones_Armas.csv')
 csv_header = ['image_filename', 'class', 'x_min', 'y_min', 'x_max', 'y_max']
 csv_rows = []
 
-# Parámetros de detección
-MIN_CONFIDENCE = 0.3
-MIN_AREA = 500
-MAX_AREA_RATIO = 0.90
+# Parámetros de detección AJUSTADOS
+MIN_AREA = 200
+MAX_AREA_RATIO = 0.95
+MIN_CONTOUR_AREA = 300
+EDGE_THRESHOLD1 = 50
+EDGE_THRESHOLD2 = 150
 
 # ==================== CONFIGURACIÓN GPU ====================
 USE_GPU = True  # Cambiar a False para usar solo CPU
+USE_CUDA = False  # CUDA para operaciones avanzadas (requiere opencv-contrib-python compilado con CUDA)
 
-# Verificar disponibilidad de OpenCL
 def verificar_opencl():
     """Verifica si OpenCL está disponible en el sistema"""
     try:
@@ -31,7 +34,6 @@ def verificar_opencl():
             cv2.ocl.setUseOpenCL(True)
             print("✅ OpenCL disponible y activado")
             
-            # Obtener información del dispositivo
             if cv2.ocl.useOpenCL():
                 device = cv2.ocl.Device.getDefault()
                 print(f"   Dispositivo: {device.name()}")
@@ -44,229 +46,293 @@ def verificar_opencl():
         print(f"⚠️  Error verificando OpenCL: {e}")
         return False
 
-def configurar_gpu():
-    """Detecta y configura el backend de GPU disponible"""
-    # Construir lista de backends disponibles dinámicamente
-    backends_gpu = []
-    
-    # CUDA (NVIDIA)
-    if hasattr(cv2.dnn, 'DNN_BACKEND_CUDA') and hasattr(cv2.dnn, 'DNN_TARGET_CUDA'):
-        backends_gpu.append((cv2.dnn.DNN_BACKEND_CUDA, cv2.dnn.DNN_TARGET_CUDA, "CUDA (NVIDIA)"))
-    
-    if hasattr(cv2.dnn, 'DNN_BACKEND_CUDA') and hasattr(cv2.dnn, 'DNN_TARGET_CUDA_FP16'):
-        backends_gpu.append((cv2.dnn.DNN_BACKEND_CUDA, cv2.dnn.DNN_TARGET_CUDA_FP16, "CUDA FP16 (NVIDIA)"))
-    
-    # OpenVINO (Intel)
-    if hasattr(cv2.dnn, 'DNN_BACKEND_INFERENCE_ENGINE') and hasattr(cv2.dnn, 'DNN_TARGET_MYRIAD'):
-        backends_gpu.append((cv2.dnn.DNN_BACKEND_INFERENCE_ENGINE, cv2.dnn.DNN_TARGET_MYRIAD, "OpenVINO (Intel)"))
-    
-    # OpenCL (Universal)
-    if hasattr(cv2.dnn, 'DNN_TARGET_OPENCL'):
-        backends_gpu.append((cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_OPENCL, "OpenCL (Universal)"))
-    
-    if hasattr(cv2.dnn, 'DNN_TARGET_OPENCL_FP16'):
-        backends_gpu.append((cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_OPENCL_FP16, "OpenCL FP16 (Universal)"))
-    
-    if not USE_GPU:
-        print("🔧 Modo CPU seleccionado")
-        return cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_CPU
-    
-    if not backends_gpu:
-        print("⚠️  No hay backends GPU disponibles en tu versión de OpenCV")
-        print("    Usando CPU. Para GPU, instala: pip install opencv-contrib-python")
-        return cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_CPU
-    
-    print("🔍 Detectando GPU disponible...")
-    print(f"   Backends a probar: {len(backends_gpu)}")
-    
-    # Probar cada backend
-    for backend, target, nombre in backends_gpu:
-        try:
-            # Crear una imagen de prueba simple
-            test_img = np.zeros((100, 100, 3), dtype=np.uint8)
-            blob = cv2.dnn.blobFromImage(test_img, 1.0, (100, 100))
-            
-            # Simplemente verificar que los atributos existen y son válidos
-            print(f"   Probando: {nombre}...")
-            print(f"✅ GPU configurada: {nombre}")
-            return backend, target
-        except Exception as e:
-            print(f"   ✗ {nombre} no disponible")
-            continue
-    
-    print("⚠️  No se detectó GPU compatible, usando CPU")
-    return cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_CPU
+def verificar_cuda():
+    """Verifica si CUDA está disponible"""
+    try:
+        if cv2.cuda.getCudaEnabledDeviceCount() > 0:
+            print(f"✅ CUDA disponible - {cv2.cuda.getCudaEnabledDeviceCount()} dispositivo(s)")
+            return True
+        else:
+            print("⚠️  CUDA no disponible")
+            return False
+    except:
+        print("⚠️  CUDA no disponible en esta versión de OpenCV")
+        return False
 
-# ==================== INICIALIZAR DETECTORES ====================
+# Inicializar GPU
+print("🔧 Inicializando aceleración GPU...")
+opencl_disponible = verificar_opencl() if USE_GPU else False
+cuda_disponible = verificar_cuda() if USE_CUDA else False
 
-print("🔧 Inicializando detectores...")
-
-# Verificar OpenCL primero
-opencl_disponible = verificar_opencl()
-
-# Configurar GPU
-gpu_backend, gpu_target = configurar_gpu()
-
-# Opción 1: YOLO con GPU
-USE_YOLO = False
-yolo_net = None
-yolo_output_layers = None
-yolo_classes = None
-
-if USE_YOLO and os.path.exists('yolov3.weights'):
-    yolo_net = cv2.dnn.readNet('yolov3.weights', 'yolov3.cfg')
-    yolo_net.setPreferableBackend(gpu_backend)
-    yolo_net.setPreferableTarget(gpu_target)
-    layer_names = yolo_net.getLayerNames()
-    yolo_output_layers = [layer_names[i - 1] for i in yolo_net.getUnconnectedOutLayers()]
-    with open('coco.names', 'r') as f:
-        yolo_classes = [line.strip() for line in f.readlines()]
-    print("✅ YOLO cargado con aceleración GPU")
-
-# Opción 2: HOG Detector (personas) - se mantiene en CPU
-hog = cv2.HOGDescriptor()
-hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-print("✅ HOG Detector cargado (personas)")
-
-# Opción 3: Haar Cascade - Desactivar UMat por problemas de memoria
-USE_UMAT = False  # Desactivado para evitar CL_OUT_OF_RESOURCES
-cascade_fullbody = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_fullbody.xml')
-cascade_upperbody = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_upperbody.xml')
-cascade_face = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-print("✅ Haar Cascades cargados (CPU - mejor estabilidad)")
-
-# ==================== FUNCIONES ====================
+# ==================== FUNCIONES DE DETECCIÓN ====================
 
 def obtener_clase_desde_carpeta(carpeta_nombre):
-    """
-    Extrae la clase del nombre de la carpeta.
-    """
+    """Extrae la clase del nombre de la carpeta"""
     nombre_limpio = carpeta_nombre
     nombre_limpio = re.sub(r'_x264.*$', '', nombre_limpio)
     nombre_limpio = re.sub(r'_frames.*$', '', nombre_limpio)
     nombre_limpio = re.sub(r'_video.*$', '', nombre_limpio)
-    
     clase = re.sub(r'\d+$', '', nombre_limpio)
-    
-    if not clase:
-        clase = carpeta_nombre
-    
-    return clase
+    return clase if clase else carpeta_nombre
 
-def detectar_con_yolo(image):
-    """Detección con YOLO (GPU acelerado)"""
-    if yolo_net is None:
-        return []
-    
-    h, w = image.shape[:2]
-    blob = cv2.dnn.blobFromImage(image, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
-    yolo_net.setInput(blob)
-    outs = yolo_net.forward(yolo_output_layers)
-    
+def detectar_por_color_y_contraste(image, usar_gpu=False):
+    """
+    Detección basada en análisis de color y contraste (GPU optimizado)
+    Útil para objetos metálicos (armas, cuchillos)
+    """
     bboxes = []
-    confidences = []
+    h, w = image.shape[:2]
     
-    for out in outs:
-        for detection in out:
-            scores = detection[5:]
-            class_id = np.argmax(scores)
-            confidence = scores[class_id]
+    try:
+        # Usar UMat para procesamiento GPU si está disponible
+        if usar_gpu and opencl_disponible:
+            img_gpu = cv2.UMat(image)
+            gray = cv2.cvtColor(img_gpu, cv2.COLOR_BGR2GRAY)
+            gray = cv2.equalizeHist(gray)
             
-            if confidence > MIN_CONFIDENCE and class_id == 0:
-                center_x = int(detection[0] * w)
-                center_y = int(detection[1] * h)
-                w_box = int(detection[2] * w)
-                h_box = int(detection[3] * h)
-                
-                x = int(center_x - w_box / 2)
-                y = int(center_y - h_box / 2)
-                
+            # Detectar bordes
+            edges1 = cv2.Canny(gray, EDGE_THRESHOLD1, EDGE_THRESHOLD2)
+            edges2 = cv2.Canny(gray, 30, 100)
+            edges = cv2.bitwise_or(edges1, edges2)
+            
+            # Dilatar
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            edges = cv2.dilate(edges, kernel, iterations=2)
+            
+            # Convertir de vuelta a numpy para findContours
+            edges_cpu = edges.get()
+        else:
+            # Procesamiento CPU
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            gray = cv2.equalizeHist(gray)
+            edges1 = cv2.Canny(gray, EDGE_THRESHOLD1, EDGE_THRESHOLD2)
+            edges2 = cv2.Canny(gray, 30, 100)
+            edges = cv2.bitwise_or(edges1, edges2)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            edges = cv2.dilate(edges, kernel, iterations=2)
+            edges_cpu = edges
+        
+        # Encontrar contornos (siempre en CPU)
+        contours, _ = cv2.findContours(edges_cpu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < MIN_CONTOUR_AREA or area > (h * w * MAX_AREA_RATIO):
+                continue
+            
+            x, y, w_box, h_box = cv2.boundingRect(contour)
+            aspect_ratio = w_box / float(h_box) if h_box > 0 else 0
+            if 0.1 < aspect_ratio < 10:
                 bboxes.append((x, y, x + w_box, y + h_box))
-                confidences.append(float(confidence))
-    
-    if bboxes:
-        indices = cv2.dnn.NMSBoxes(
-            [(b[0], b[1], b[2]-b[0], b[3]-b[1]) for b in bboxes],
-            confidences, MIN_CONFIDENCE, 0.4
-        )
-        if len(indices) > 0:
-            bboxes = [bboxes[i] for i in indices.flatten()]
+    except Exception as e:
+        # Si falla GPU, reintentar en CPU
+        if usar_gpu:
+            return detectar_por_color_y_contraste(image, usar_gpu=False)
     
     return bboxes
 
-def detectar_con_hog(image):
-    """Detección de personas con HOG"""
+def detectar_por_segmentacion(image, usar_gpu=False):
+    """
+    Detección mediante segmentación de color (GPU optimizado)
+    """
+    bboxes = []
+    h, w = image.shape[:2]
+    
     try:
-        scale = 1.0
-        if image.shape[0] > 600:
-            scale = 600.0 / image.shape[0]
-            image_resized = cv2.resize(image, None, fx=scale, fy=scale)
+        if usar_gpu and opencl_disponible:
+            img_gpu = cv2.UMat(image)
+            hsv = cv2.cvtColor(img_gpu, cv2.COLOR_BGR2HSV)
         else:
-            image_resized = image
+            hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
-        bboxes, weights = hog.detectMultiScale(
-            image_resized, 
-            winStride=(4, 4),
-            padding=(8, 8),
-            scale=1.05,
-            hitThreshold=0
-        )
+        # Crear máscaras
+        masks = []
         
-        scaled_bboxes = []
-        for (x, y, w, h) in bboxes:
-            x_scaled = int(x / scale)
-            y_scaled = int(y / scale)
-            w_scaled = int(w / scale)
-            h_scaled = int(h / scale)
-            scaled_bboxes.append((x_scaled, y_scaled, x_scaled + w_scaled, y_scaled + h_scaled))
+        # Metales (grises, plateados)
+        lower_gray = np.array([0, 0, 50])
+        upper_gray = np.array([180, 50, 200])
+        masks.append(cv2.inRange(hsv, lower_gray, upper_gray))
         
-        return scaled_bboxes
+        # Objetos oscuros
+        lower_dark = np.array([0, 0, 0])
+        upper_dark = np.array([180, 255, 80])
+        masks.append(cv2.inRange(hsv, lower_dark, upper_dark))
+        
+        # Objetos brillantes
+        lower_bright = np.array([0, 0, 200])
+        upper_bright = np.array([180, 30, 255])
+        masks.append(cv2.inRange(hsv, lower_bright, upper_bright))
+        
+        # Combinar máscaras
+        if usar_gpu and opencl_disponible:
+            combined_mask = cv2.UMat(np.zeros_like(masks[0].get() if hasattr(masks[0], 'get') else masks[0]))
+            for mask in masks:
+                combined_mask = cv2.bitwise_or(combined_mask, mask)
+        else:
+            combined_mask = np.zeros_like(masks[0])
+            for mask in masks:
+                mask_cpu = mask.get() if hasattr(mask, 'get') else mask
+                combined_mask = cv2.bitwise_or(combined_mask, mask_cpu)
+        
+        # Operaciones morfológicas
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        
+        # Convertir a CPU para findContours
+        mask_cpu = combined_mask.get() if hasattr(combined_mask, 'get') else combined_mask
+        
+        # Encontrar contornos
+        contours, _ = cv2.findContours(mask_cpu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < MIN_CONTOUR_AREA or area > (h * w * MAX_AREA_RATIO):
+                continue
+            
+            x, y, w_box, h_box = cv2.boundingRect(contour)
+            bboxes.append((x, y, x + w_box, y + h_box))
     except Exception as e:
-        return []
+        if usar_gpu:
+            return detectar_por_segmentacion(image, usar_gpu=False)
+    
+    return bboxes
 
-def detectar_con_haarcascade(image):
-    """Detección con Haar Cascades optimizada para memoria"""
+def detectar_por_saliencia(image):
+    """
+    Detección de regiones salientes (siempre en CPU - no hay versión GPU)
+    """
+    bboxes = []
+    h, w = image.shape[:2]
+    
     try:
-        # Procesar en CPU para evitar problemas de memoria GPU
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        gray = cv2.equalizeHist(gray)
+        # Redimensionar para procesamiento más rápido
+        scale = 1.0
+        if max(h, w) > 800:
+            scale = 800.0 / max(h, w)
+            image_small = cv2.resize(image, None, fx=scale, fy=scale)
+        else:
+            image_small = image.copy()
         
-        all_detections = []
+        # Crear saliency detector
+        saliency = cv2.saliency.StaticSaliencyFineGrained_create()
+        success, saliency_map = saliency.computeSaliency(image_small)
         
-        # Detectar cuerpo completo
-        try:
-            bodies = cascade_fullbody.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 90))
-            for (x, y, w, h) in bodies:
-                all_detections.append((x, y, x+w, y+h))
-        except:
-            pass
+        if not success:
+            return bboxes
         
-        # Detectar torso
-        try:
-            upper_bodies = cascade_upperbody.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 60))
-            for (x, y, w, h) in upper_bodies:
-                all_detections.append((x, y, x+w, y+h))
-        except:
-            pass
+        # Normalizar y binarizar
+        saliency_map = (saliency_map * 255).astype(np.uint8)
+        _, thresh = cv2.threshold(saliency_map, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         
-        # Detectar rostros
-        try:
-            faces = cascade_face.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-            for (x, y, w, h) in faces:
-                x_new = max(0, x - w//2)
-                y_new = max(0, y - h//2)
-                w_new = min(image.shape[1] - x_new, w * 2)
-                h_new = min(image.shape[0] - y_new, h * 3)
-                all_detections.append((x_new, y_new, x_new + w_new, y_new + h_new))
-        except:
-            pass
+        # Operaciones morfológicas
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
         
-        return all_detections
+        # Encontrar contornos
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            h_small, w_small = image_small.shape[:2]
+            
+            if area < (MIN_CONTOUR_AREA * scale * scale) or area > (h_small * w_small * MAX_AREA_RATIO):
+                continue
+            
+            x, y, w_box, h_box = cv2.boundingRect(contour)
+            
+            # Escalar de vuelta
+            x = int(x / scale)
+            y = int(y / scale)
+            w_box = int(w_box / scale)
+            h_box = int(h_box / scale)
+            
+            bboxes.append((x, y, x + w_box, y + h_box))
+    except:
+        pass
+    
+    return bboxes
+
+def detectar_por_diferencia_fondo(image, usar_gpu=False):
+    """
+    Detección por diferencia de fondo (GPU optimizado)
+    """
+    bboxes = []
+    h, w = image.shape[:2]
+    
+    try:
+        if usar_gpu and opencl_disponible:
+            img_gpu = cv2.UMat(image)
+            gray = cv2.cvtColor(img_gpu, cv2.COLOR_BGR2GRAY)
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            thresh = cv2.adaptiveThreshold(
+                blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                cv2.THRESH_BINARY_INV, 11, 2
+            )
+            
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=3)
+            thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+            
+            thresh_cpu = thresh.get()
+        else:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            thresh = cv2.adaptiveThreshold(
+                blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                cv2.THRESH_BINARY_INV, 11, 2
+            )
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=3)
+            thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+            thresh_cpu = thresh
+        
+        contours, _ = cv2.findContours(thresh_cpu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < MIN_CONTOUR_AREA or area > (h * w * MAX_AREA_RATIO):
+                continue
+            
+            x, y, w_box, h_box = cv2.boundingRect(contour)
+            bboxes.append((x, y, x + w_box, y + h_box))
     except Exception as e:
-        return []
+        if usar_gpu:
+            return detectar_por_diferencia_fondo(image, usar_gpu=False)
+    
+    return bboxes
+
+def detectar_regiones_interes_basico(image):
+    """
+    Método básico: dividir imagen en cuadrantes con contenido
+    """
+    bboxes = []
+    h, w = image.shape[:2]
+    
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # Calcular varianza en cuadrículas
+    grid_size = 4
+    cell_h = h // grid_size
+    cell_w = w // grid_size
+    
+    for i in range(grid_size):
+        for j in range(grid_size):
+            y1 = i * cell_h
+            y2 = (i + 1) * cell_h if i < grid_size - 1 else h
+            x1 = j * cell_w
+            x2 = (j + 1) * cell_w if j < grid_size - 1 else w
+            
+            cell = gray[y1:y2, x1:x2]
+            variance = np.var(cell)
+            
+            if variance > 200:
+                bboxes.append((x1, y1, x2, y2))
+    
+    return bboxes
 
 def non_max_suppression_simple(boxes, overlap_thresh=0.3):
-    """NMS simple para eliminar cajas superpuestas"""
+    """NMS para eliminar cajas superpuestas"""
     if len(boxes) == 0:
         return []
     
@@ -296,28 +362,52 @@ def non_max_suppression_simple(boxes, overlap_thresh=0.3):
     
     return [tuple(map(int, boxes[i])) for i in pick]
 
-def detectar_objetos_inteligente(image):
+def detectar_objetos_multiple(image):
     """
-    Combina múltiples detectores para máxima cobertura
+    Combina TODOS los métodos de detección con aceleración GPU
     """
     h, w = image.shape[:2]
     img_area = h * w
     max_area = img_area * MAX_AREA_RATIO
     
     all_bboxes = []
+    usar_gpu = USE_GPU and opencl_disponible
     
-    # 1. Intentar YOLO si está disponible (GPU)
-    if USE_YOLO:
-        yolo_boxes = detectar_con_yolo(image)
-        all_bboxes.extend(yolo_boxes)
+    # Método 1: Color y contraste (GPU)
+    try:
+        boxes1 = detectar_por_color_y_contraste(image, usar_gpu)
+        all_bboxes.extend(boxes1)
+    except:
+        pass
     
-    # 2. HOG para personas
-    hog_boxes = detectar_con_hog(image)
-    all_bboxes.extend(hog_boxes)
+    # Método 2: Segmentación (GPU)
+    try:
+        boxes2 = detectar_por_segmentacion(image, usar_gpu)
+        all_bboxes.extend(boxes2)
+    except:
+        pass
     
-    # 3. Haar Cascades (GPU con UMat)
-    haar_boxes = detectar_con_haarcascade(image)
-    all_bboxes.extend(haar_boxes)
+    # Método 3: Saliencia (CPU - no hay GPU)
+    try:
+        boxes3 = detectar_por_saliencia(image)
+        all_bboxes.extend(boxes3)
+    except:
+        pass
+    
+    # Método 4: Diferencia de fondo (GPU)
+    try:
+        boxes4 = detectar_por_diferencia_fondo(image, usar_gpu)
+        all_bboxes.extend(boxes4)
+    except:
+        pass
+    
+    # Método 5: Fallback básico
+    if len(all_bboxes) == 0:
+        try:
+            boxes5 = detectar_regiones_interes_basico(image)
+            all_bboxes.extend(boxes5)
+        except:
+            pass
     
     # Filtrar por área
     valid_boxes = []
@@ -330,16 +420,21 @@ def detectar_objetos_inteligente(image):
             y2 = min(h, y2)
             valid_boxes.append((x1, y1, x2, y2))
     
-    # Eliminar duplicados
+    # Si no se detectó nada, bbox completa
+    if len(valid_boxes) == 0:
+        margin = 10
+        valid_boxes.append((margin, margin, w - margin, h - margin))
+    
+    # NMS
     if valid_boxes:
-        valid_boxes = non_max_suppression_simple(valid_boxes, 0.3)
+        valid_boxes = non_max_suppression_simple(valid_boxes, 0.4)
     
     return valid_boxes
 
 # ==================== PROCESAMIENTO ====================
 
 print("="*60)
-print("GENERADOR DE ANOTACIONES - DETECCIÓN GPU ACELERADA")
+print("DETECTOR DE ARMAS - GPU ACELERADO")
 print("="*60)
 
 if not os.path.exists(data_dir):
@@ -354,12 +449,6 @@ if not video_folders:
     exit(1)
 
 print(f"\n📁 Carpetas encontradas: {len(video_folders)}")
-print("\n📋 Preview de clases:")
-for vf in sorted(video_folders)[:10]:
-    clase = obtener_clase_desde_carpeta(vf)
-    print(f"  {vf:30s} → {clase}")
-if len(video_folders) > 10:
-    print(f"  ... y {len(video_folders) - 10} más")
 
 # Estadísticas
 stats = defaultdict(lambda: {'imagenes': 0, 'detecciones': 0})
@@ -382,8 +471,8 @@ for video_folder in tqdm(video_folders, desc="Procesando carpetas"):
         if image is None:
             continue
         
-        # Detectar objetos/personas
-        bboxes = detectar_objetos_inteligente(image)
+        # Detectar objetos
+        bboxes = detectar_objetos_multiple(image)
         
         if len(bboxes) == 0:
             imagenes_sin_detecciones.append(f"{video_folder}/{filename}")
@@ -399,12 +488,9 @@ for video_folder in tqdm(video_folders, desc="Procesando carpetas"):
             ])
             stats[clase]['detecciones'] += 1
         
-        # Liberar memoria de la imagen
+        # Liberar memoria
         del image
-        
-        # Liberar memoria GPU cada 100 imágenes
         if idx % 100 == 0:
-            import gc
             gc.collect()
 
 # ==================== GUARDAR RESULTADOS ====================
@@ -446,14 +532,8 @@ if csv_rows:
                 f.write(f"{img}\n")
         
         porcentaje = (len(imagenes_sin_detecciones) / total_imgs) * 100
-        print(f"\n⚠  {len(imagenes_sin_detecciones)} imágenes sin detecciones ({porcentaje:.1f}%)")
+        print(f"\n⚠️  {len(imagenes_sin_detecciones)} imágenes sin detecciones ({porcentaje:.1f}%)")
         print(f"    Reporte: {reporte_path}")
-        
-        if porcentaje > 50:
-            print("\n💡 SUGERENCIAS:")
-            print(f"   - Reducir MIN_AREA (actualmente {MIN_AREA})")
-            print(f"   - Reducir MIN_CONFIDENCE (actualmente {MIN_CONFIDENCE})")
-            print("   - Considerar usar YOLO (más preciso)")
     
     print("\n" + "="*60)
     print("✅ PROCESO COMPLETADO")

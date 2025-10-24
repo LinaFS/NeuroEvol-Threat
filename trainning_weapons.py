@@ -7,175 +7,244 @@ from tqdm import tqdm
 from collections import defaultdict
 
 # ==================== CONFIGURACIÓN ====================
-data_dir = 'dataArmas'  # Carpeta con subcarpetas de imágenes por clase
-output_root = os.path.join('', 'resultados')
+data_dir = 'dataArmas'
+output_root = os.path.join('', 'Resultados')
 os.makedirs(output_root, exist_ok=True)
+
 annotations_path = os.path.join(output_root, 'anotaciones_Armas.csv')
 csv_header = ['image_filename', 'class', 'x_min', 'y_min', 'x_max', 'y_max']
 csv_rows = []
 
-# Parámetros de detección
-MIN_CONFIDENCE = 0.3  # Confianza mínima para detectar
-MIN_AREA = 500
-MAX_AREA_RATIO = 0.90
+# Parámetros de detección AJUSTADOS
+MIN_AREA = 200  # Reducido de 500
+MAX_AREA_RATIO = 0.95  # Aumentado de 0.90
+MIN_CONTOUR_AREA = 300  # Para detección por contornos
+EDGE_THRESHOLD1 = 50
+EDGE_THRESHOLD2 = 150
 
-# ==================== INICIALIZAR DETECTORES ====================
-
-print("🔧 Inicializando detectores...")
-
-# Opción 1: YOLO (más preciso, requiere descargar pesos)
-USE_YOLO = False  # Cambiar a True si tienes yolov3.weights
-yolo_net = None
-yolo_output_layers = None
-yolo_classes = None
-
-if USE_YOLO and os.path.exists('yolov3.weights'):
-    yolo_net = cv2.dnn.readNet('yolov3.weights', 'yolov3.cfg')
-    layer_names = yolo_net.getLayerNames()
-    yolo_output_layers = [layer_names[i - 1] for i in yolo_net.getUnconnectedOutLayers()]
-    with open('coco.names', 'r') as f:
-        yolo_classes = [line.strip() for line in f.readlines()]
-    print("✅ YOLO cargado")
-
-# Opción 2: HOG Detector (personas)
-hog = cv2.HOGDescriptor()
-hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-print("✅ HOG Detector cargado (personas)")
-
-# Opción 3: Haar Cascade (personas/rostros)
-cascade_fullbody = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_fullbody.xml')
-cascade_upperbody = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_upperbody.xml')
-cascade_face = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-print("✅ Haar Cascades cargados")
-
-# ==================== FUNCIONES ====================
+# ==================== FUNCIONES DE DETECCIÓN ====================
 
 def obtener_clase_desde_carpeta(carpeta_nombre):
-    """
-    Extrae la clase del nombre de la carpeta.
-    Ejemplos:
-      - "Abuse002_x264_frames" → "Abuse"
-      - "Assault015_something" → "Assault"
-      - "Normal" → "Normal"
-    """
+    """Extrae la clase del nombre de la carpeta"""
     nombre_limpio = carpeta_nombre
     nombre_limpio = re.sub(r'_x264.*$', '', nombre_limpio)
     nombre_limpio = re.sub(r'_frames.*$', '', nombre_limpio)
     nombre_limpio = re.sub(r'_video.*$', '', nombre_limpio)
-    
     clase = re.sub(r'\d+$', '', nombre_limpio)
-    
-    if not clase:
-        clase = carpeta_nombre
-    
-    return clase
+    return clase if clase else carpeta_nombre
 
-def detectar_con_yolo(image):
-    """Detección con YOLO"""
-    if yolo_net is None:
-        return []
-    
-    h, w = image.shape[:2]
-    blob = cv2.dnn.blobFromImage(image, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
-    yolo_net.setInput(blob)
-    outs = yolo_net.forward(yolo_output_layers)
-    
+def detectar_por_color_y_contraste(image):
+    """
+    Detección basada en análisis de color y contraste
+    Útil para objetos metálicos (armas, cuchillos)
+    """
     bboxes = []
-    confidences = []
+    h, w = image.shape[:2]
     
-    for out in outs:
-        for detection in out:
-            scores = detection[5:]
-            class_id = np.argmax(scores)
-            confidence = scores[class_id]
-            
-            # Detectar solo personas (class_id 0 en COCO)
-            if confidence > MIN_CONFIDENCE and class_id == 0:
-                center_x = int(detection[0] * w)
-                center_y = int(detection[1] * h)
-                w_box = int(detection[2] * w)
-                h_box = int(detection[3] * h)
-                
-                x = int(center_x - w_box / 2)
-                y = int(center_y - h_box / 2)
-                
-                bboxes.append((x, y, x + w_box, y + h_box))
-                confidences.append(float(confidence))
+    # Convertir a escala de grises
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
-    # Non-maximum suppression
-    if bboxes:
-        indices = cv2.dnn.NMSBoxes(
-            [(b[0], b[1], b[2]-b[0], b[3]-b[1]) for b in bboxes],
-            confidences, MIN_CONFIDENCE, 0.4
-        )
-        if len(indices) > 0:
-            bboxes = [bboxes[i] for i in indices.flatten()]
+    # Ecualizar histograma para mejorar contraste
+    gray = cv2.equalizeHist(gray)
+    
+    # Detectar bordes con múltiples umbrales
+    edges1 = cv2.Canny(gray, EDGE_THRESHOLD1, EDGE_THRESHOLD2)
+    edges2 = cv2.Canny(gray, 30, 100)
+    edges = cv2.bitwise_or(edges1, edges2)
+    
+    # Dilatar para conectar bordes cercanos
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    edges = cv2.dilate(edges, kernel, iterations=2)
+    
+    # Encontrar contornos
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < MIN_CONTOUR_AREA or area > (h * w * MAX_AREA_RATIO):
+            continue
+        
+        x, y, w_box, h_box = cv2.boundingRect(contour)
+        
+        # Filtrar por proporción (evitar líneas muy delgadas o muy anchas)
+        aspect_ratio = w_box / float(h_box) if h_box > 0 else 0
+        if 0.1 < aspect_ratio < 10:
+            bboxes.append((x, y, x + w_box, y + h_box))
     
     return bboxes
 
-def detectar_con_hog(image):
-    """Detección de personas con HOG"""
-    try:
-        # Reducir tamaño para mejor rendimiento
-        scale = 1.0
-        if image.shape[0] > 600:
-            scale = 600.0 / image.shape[0]
-            image_resized = cv2.resize(image, None, fx=scale, fy=scale)
-        else:
-            image_resized = image
+def detectar_por_segmentacion(image):
+    """
+    Detección mediante segmentación de color
+    Útil para objetos con colores distintivos
+    """
+    bboxes = []
+    h, w = image.shape[:2]
+    
+    # Convertir a HSV
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    
+    # Crear múltiples máscaras para diferentes rangos de color
+    masks = []
+    
+    # Metales (grises, plateados)
+    lower_gray = np.array([0, 0, 50])
+    upper_gray = np.array([180, 50, 200])
+    masks.append(cv2.inRange(hsv, lower_gray, upper_gray))
+    
+    # Objetos oscuros (negro, gris oscuro)
+    lower_dark = np.array([0, 0, 0])
+    upper_dark = np.array([180, 255, 80])
+    masks.append(cv2.inRange(hsv, lower_dark, upper_dark))
+    
+    # Objetos brillantes
+    lower_bright = np.array([0, 0, 200])
+    upper_bright = np.array([180, 30, 255])
+    masks.append(cv2.inRange(hsv, lower_bright, upper_bright))
+    
+    # Combinar todas las máscaras
+    combined_mask = np.zeros_like(masks[0])
+    for mask in masks:
+        combined_mask = cv2.bitwise_or(combined_mask, mask)
+    
+    # Operaciones morfológicas
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    
+    # Encontrar contornos
+    contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < MIN_CONTOUR_AREA or area > (h * w * MAX_AREA_RATIO):
+            continue
         
-        bboxes, weights = hog.detectMultiScale(
-            image_resized, 
-            winStride=(4, 4),
-            padding=(8, 8),
-            scale=1.05,
-            hitThreshold=0
-        )
+        x, y, w_box, h_box = cv2.boundingRect(contour)
+        bboxes.append((x, y, x + w_box, y + h_box))
+    
+    return bboxes
+
+def detectar_por_saliencia(image):
+    """
+    Detección de regiones salientes (prominentes) en la imagen
+    """
+    bboxes = []
+    h, w = image.shape[:2]
+    
+    # Redimensionar para procesamiento más rápido
+    scale = 1.0
+    if max(h, w) > 800:
+        scale = 800.0 / max(h, w)
+        image_small = cv2.resize(image, None, fx=scale, fy=scale)
+    else:
+        image_small = image.copy()
+    
+    # Crear saliency detector
+    saliency = cv2.saliency.StaticSaliencyFineGrained_create()
+    success, saliency_map = saliency.computeSaliency(image_small)
+    
+    if not success:
+        return bboxes
+    
+    # Normalizar y binarizar
+    saliency_map = (saliency_map * 255).astype(np.uint8)
+    _, thresh = cv2.threshold(saliency_map, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Operaciones morfológicas
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+    
+    # Encontrar contornos
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        h_small, w_small = image_small.shape[:2]
+        
+        if area < (MIN_CONTOUR_AREA * scale * scale) or area > (h_small * w_small * MAX_AREA_RATIO):
+            continue
+        
+        x, y, w_box, h_box = cv2.boundingRect(contour)
         
         # Escalar de vuelta al tamaño original
-        scaled_bboxes = []
-        for (x, y, w, h) in bboxes:
-            x_scaled = int(x / scale)
-            y_scaled = int(y / scale)
-            w_scaled = int(w / scale)
-            h_scaled = int(h / scale)
-            scaled_bboxes.append((x_scaled, y_scaled, x_scaled + w_scaled, y_scaled + h_scaled))
+        x = int(x / scale)
+        y = int(y / scale)
+        w_box = int(w_box / scale)
+        h_box = int(h_box / scale)
         
-        return scaled_bboxes
-    except Exception as e:
-        return []
+        bboxes.append((x, y, x + w_box, y + h_box))
+    
+    return bboxes
 
-def detectar_con_haarcascade(image):
-    """Detección con Haar Cascades (cuerpo completo, torso, rostro)"""
+def detectar_por_diferencia_fondo(image):
+    """
+    Detección asumiendo que el objeto está en primer plano
+    """
+    bboxes = []
+    h, w = image.shape[:2]
+    
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    gray = cv2.equalizeHist(gray)
     
-    all_detections = []
+    # Aplicar desenfoque para reducir ruido
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     
-    # Detectar cuerpo completo
-    bodies = cascade_fullbody.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 90))
-    for (x, y, w, h) in bodies:
-        all_detections.append((x, y, x+w, y+h))
+    # Umbral adaptativo
+    thresh = cv2.adaptiveThreshold(
+        blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+        cv2.THRESH_BINARY_INV, 11, 2
+    )
     
-    # Detectar torso
-    upper_bodies = cascade_upperbody.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 60))
-    for (x, y, w, h) in upper_bodies:
-        all_detections.append((x, y, x+w, y+h))
+    # Operaciones morfológicas
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=3)
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
     
-    # Detectar rostros
-    faces = cascade_face.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-    for (x, y, w, h) in faces:
-        # Expandir el rostro para incluir más contexto
-        x_new = max(0, x - w//2)
-        y_new = max(0, y - h//2)
-        w_new = min(image.shape[1] - x_new, w * 2)
-        h_new = min(image.shape[0] - y_new, h * 3)
-        all_detections.append((x_new, y_new, x_new + w_new, y_new + h_new))
+    # Encontrar contornos
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    return all_detections
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < MIN_CONTOUR_AREA or area > (h * w * MAX_AREA_RATIO):
+            continue
+        
+        x, y, w_box, h_box = cv2.boundingRect(contour)
+        bboxes.append((x, y, x + w_box, y + h_box))
+    
+    return bboxes
+
+def detectar_regiones_interes_basico(image):
+    """
+    Método básico: dividir imagen en cuadrantes con contenido
+    """
+    bboxes = []
+    h, w = image.shape[:2]
+    
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # Calcular varianza en cuadrículas
+    grid_size = 4
+    cell_h = h // grid_size
+    cell_w = w // grid_size
+    
+    for i in range(grid_size):
+        for j in range(grid_size):
+            y1 = i * cell_h
+            y2 = (i + 1) * cell_h if i < grid_size - 1 else h
+            x1 = j * cell_w
+            x2 = (j + 1) * cell_w if j < grid_size - 1 else w
+            
+            cell = gray[y1:y2, x1:x2]
+            variance = np.var(cell)
+            
+            # Si hay suficiente varianza, hay contenido
+            if variance > 200:  # Umbral ajustable
+                bboxes.append((x1, y1, x2, y2))
+    
+    return bboxes
 
 def non_max_suppression_simple(boxes, overlap_thresh=0.3):
-    """NMS simple para eliminar cajas superpuestas"""
+    """NMS para eliminar cajas superpuestas"""
     if len(boxes) == 0:
         return []
     
@@ -205,9 +274,9 @@ def non_max_suppression_simple(boxes, overlap_thresh=0.3):
     
     return [tuple(map(int, boxes[i])) for i in pick]
 
-def detectar_objetos_inteligente(image):
+def detectar_objetos_multiple(image):
     """
-    Combina múltiples detectores para máxima cobertura
+    Combina TODOS los métodos de detección para máxima cobertura
     """
     h, w = image.shape[:2]
     img_area = h * w
@@ -215,61 +284,82 @@ def detectar_objetos_inteligente(image):
     
     all_bboxes = []
     
-    # 1. Intentar YOLO si está disponible
-    if USE_YOLO:
-        yolo_boxes = detectar_con_yolo(image)
-        all_bboxes.extend(yolo_boxes)
+    try:
+        # Método 1: Detección por color y contraste
+        boxes1 = detectar_por_color_y_contraste(image)
+        all_bboxes.extend(boxes1)
+    except Exception as e:
+        print(f"  Error en método 1: {e}")
     
-    # 2. HOG para personas
-    hog_boxes = detectar_con_hog(image)
-    all_bboxes.extend(hog_boxes)
+    try:
+        # Método 2: Segmentación por color
+        boxes2 = detectar_por_segmentacion(image)
+        all_bboxes.extend(boxes2)
+    except Exception as e:
+        print(f"  Error en método 2: {e}")
     
-    # 3. Haar Cascades como respaldo
-    haar_boxes = detectar_con_haarcascade(image)
-    all_bboxes.extend(haar_boxes)
+    try:
+        # Método 3: Detección de saliencia
+        boxes3 = detectar_por_saliencia(image)
+        all_bboxes.extend(boxes3)
+    except Exception as e:
+        print(f"  Error en método 3: {e}")
+    
+    try:
+        # Método 4: Diferencia de fondo
+        boxes4 = detectar_por_diferencia_fondo(image)
+        all_bboxes.extend(boxes4)
+    except Exception as e:
+        print(f"  Error en método 4: {e}")
+    
+    # Método 5: Regiones de interés básicas (fallback)
+    if len(all_bboxes) == 0:
+        try:
+            boxes5 = detectar_regiones_interes_basico(image)
+            all_bboxes.extend(boxes5)
+        except Exception as e:
+            print(f"  Error en método 5: {e}")
     
     # Filtrar por área
     valid_boxes = []
     for (x1, y1, x2, y2) in all_bboxes:
         area = (x2 - x1) * (y2 - y1)
         if MIN_AREA < area < max_area:
-            # Asegurar que esté dentro de la imagen
             x1 = max(0, x1)
             y1 = max(0, y1)
             x2 = min(w, x2)
             y2 = min(h, y2)
             valid_boxes.append((x1, y1, x2, y2))
     
+    # Si no se detectó nada, crear bbox de imagen completa con margen
+    if len(valid_boxes) == 0:
+        margin = 10
+        valid_boxes.append((margin, margin, w - margin, h - margin))
+    
     # Eliminar duplicados
     if valid_boxes:
-        valid_boxes = non_max_suppression_simple(valid_boxes, 0.3)
+        valid_boxes = non_max_suppression_simple(valid_boxes, 0.4)
     
     return valid_boxes
 
 # ==================== PROCESAMIENTO ====================
 
 print("="*60)
-print("GENERADOR DE ANOTACIONES - DETECCIÓN INTELIGENTE")
+print("GENERADOR DE ANOTACIONES MEJORADO - DETECCIÓN DE OBJETOS")
 print("="*60)
 
 if not os.path.exists(data_dir):
-    print(f"❌ Error: No existe la carpeta '{data_dir}'")
+    print(f"Error: No existe la carpeta '{data_dir}'")
     exit(1)
 
 video_folders = [d for d in os.listdir(data_dir) 
                  if os.path.isdir(os.path.join(data_dir, d))]
 
 if not video_folders:
-    print(f"❌ No se encontraron subcarpetas en '{data_dir}'")
+    print(f"No se encontraron subcarpetas en '{data_dir}'")
     exit(1)
 
-print(f"\n📁 Carpetas encontradas: {len(video_folders)}")
-print("\n📋 Preview de clases:")
-for vf in sorted(video_folders)[:10]:
-    clase = obtener_clase_desde_carpeta(vf)
-    print(f"  {vf:30s} → {clase}")
-if len(video_folders) > 10:
-    print(f"  ... y {len(video_folders) - 10} más")
+print(f"\nCarpetas encontradas: {len(video_folders)}")
 
 # Estadísticas
 stats = defaultdict(lambda: {'imagenes': 0, 'detecciones': 0})
@@ -292,8 +382,8 @@ for video_folder in tqdm(video_folders, desc="Procesando carpetas"):
         if image is None:
             continue
         
-        # Detectar objetos/personas
-        bboxes = detectar_objetos_inteligente(image)
+        # Detectar objetos con múltiples métodos
+        bboxes = detectar_objetos_multiple(image)
         
         if len(bboxes) == 0:
             imagenes_sin_detecciones.append(f"{video_folder}/{filename}")
@@ -317,8 +407,8 @@ if csv_rows:
         writer.writerow(csv_header)
         writer.writerows(csv_rows)
     
-    print(f"\n✅ Anotaciones guardadas: {annotations_path}")
-    print(f"\n📊 ESTADÍSTICAS POR CLASE:")
+    print(f"\nAnotaciones guardadas: {annotations_path}")
+    print(f"\nESTADÍSTICAS POR CLASE:")
     print("-" * 70)
     print(f"  {'CLASE':20s} | {'IMÁGENES':>8s} | {'DETECCIONES':>11s} | {'PROM':>6s}")
     print("-" * 70)
@@ -340,11 +430,7 @@ if csv_rows:
     print(f"  {'TOTAL':20s} | {total_imgs:8d} | {total_dets:11d} | {avg_total:6.2f}")
     
     if imagenes_sin_detecciones:
-<<<<<<< HEAD
-        reporte_path = os.path.join(output_root, 'imagenes_sin_detecciones_Armas.txt')
-=======
         reporte_path = os.path.join(output_root, 'imagenes_sin_detecciones_armas.txt')
->>>>>>> 884687703343f1b9b7f8d5b84ce82b5d1a76c029
         with open(reporte_path, 'w', encoding='utf-8') as f:
             f.write(f"Total: {len(imagenes_sin_detecciones)}\n")
             f.write("="*60 + "\n")
@@ -354,15 +440,9 @@ if csv_rows:
         porcentaje = (len(imagenes_sin_detecciones) / total_imgs) * 100
         print(f"\n⚠  {len(imagenes_sin_detecciones)} imágenes sin detecciones ({porcentaje:.1f}%)")
         print(f"    Reporte: {reporte_path}")
-        
-        if porcentaje > 50:
-            print("\n💡 SUGERENCIAS:")
-            print("   - Reducir MIN_AREA (actualmente {})".format(MIN_AREA))
-            print("   - Reducir MIN_CONFIDENCE (actualmente {})".format(MIN_CONFIDENCE))
-            print("   - Considerar usar YOLO (más preciso)")
     
     print("\n" + "="*60)
-    print("✅ PROCESO COMPLETADO")
+    print("PROCESO COMPLETADO")
     print("="*60)
 else:
-    print("\n❌ No se generaron anotaciones.")
+    print("\nNo se generaron anotaciones.")
