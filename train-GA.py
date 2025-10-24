@@ -82,14 +82,13 @@ class CheckpointManager:
         self.checkpoint_dir = checkpoint_dir
         self.checkpoint_file = os.path.join(checkpoint_dir, 'ga_checkpoint.pkl')
     
-    def save(self, generation, population, hof, logbook, stats):
-        """Guarda el estado actual del GA"""
+    def save(self, generation, population, hof, logbook):
+        """Guarda el estado actual del GA (sin stats que contiene lambda)"""
         checkpoint_data = {
             'generation': generation,
             'population': population,
             'hof': hof,
             'logbook': logbook,
-            'stats': stats,
             'timestamp': datetime.now().isoformat(),
             'config': GA_CONFIG
         }
@@ -355,9 +354,10 @@ def evaluate_individual(individual: list) -> tuple:
         
         eval_time = time.time() - start_time
         
-        f1_score = float(results.box.f1) if results.box.f1 is not None else 0.0
-        precision = float(results.box.precision) if results.box.precision is not None else 0.0
-        recall = float(results.box.recall) if results.box.recall is not None else 0.0
+        # ✅ CORRECCIÓN: Usar .mean() para obtener promedio de todas las clases
+        f1_score = float(results.box.f1.mean()) if results.box.f1 is not None else 0.0
+        precision = float(results.box.p.mean()) if results.box.p is not None else 0.0
+        recall = float(results.box.r.mean()) if results.box.r is not None else 0.0
         latency = results.speed['inference'] / 1000.0
         fp_rate = max(0.0, 1.0 - precision)
         
@@ -434,11 +434,12 @@ def train_baseline():
     
     val_results = model.val(data=DATASET_PATH)
     
+    # ✅ CORRECCIÓN: Usar .mean() para todas las métricas
     baseline_metrics = {
-        'f1': float(val_results.box.f1) if val_results.box.f1 is not None else 0.0,
-        'precision': float(val_results.box.precision) if val_results.box.precision is not None else 0.0,
-        'recall': float(val_results.box.recall) if val_results.box.recall is not None else 0.0,
-        'fp_rate': max(0.0, 1.0 - float(val_results.box.precision)) if val_results.box.precision is not None else 1.0,
+        'f1': float(val_results.box.f1.mean()) if val_results.box.f1 is not None else 0.0,
+        'precision': float(val_results.box.p.mean()) if val_results.box.p is not None else 0.0,
+        'recall': float(val_results.box.r.mean()) if val_results.box.r is not None else 0.0,
+        'fp_rate': max(0.0, 1.0 - float(val_results.box.p.mean())) if val_results.box.p is not None else 1.0,
         'latency': val_results.speed['inference'] / 1000.0
     }
     
@@ -535,8 +536,8 @@ def run_genetic_algorithm(resume=False):
         print(f"   Promedio: {record['avg']:.4f}")
         print(f"   Peor: {record['min']:.4f}")
         
-        # Guardar checkpoint
-        checkpoint_mgr.save(gen, population, hof, logbook, stats)
+        # ✅ CORRECCIÓN: No pasar stats al checkpoint
+        checkpoint_mgr.save(gen, population, hof, logbook)
         
         # Generar gráficas
         if gen > 0:
@@ -626,11 +627,12 @@ def train_best_model(best_individual, epochs=None):
     
     val_results = model.val(data=params['data'])
     
+    # ✅ CORRECCIÓN: Usar .mean() para todas las métricas
     ga_metrics = {
-        'f1': float(val_results.box.f1) if val_results.box.f1 is not None else 0.0,
-        'precision': float(val_results.box.precision) if val_results.box.precision is not None else 0.0,
-        'recall': float(val_results.box.recall) if val_results.box.recall is not None else 0.0,
-        'fp_rate': max(0.0, 1.0 - float(val_results.box.precision)) if val_results.box.precision is not None else 1.0,
+        'f1': float(val_results.box.f1.mean()) if val_results.box.f1 is not None else 0.0,
+        'precision': float(val_results.box.p.mean()) if val_results.box.p is not None else 0.0,
+        'recall': float(val_results.box.r.mean()) if val_results.box.r is not None else 0.0,
+        'fp_rate': max(0.0, 1.0 - float(val_results.box.p.mean())) if val_results.box.p is not None else 1.0,
         'latency': val_results.speed['inference'] / 1000.0
     }
     
@@ -658,102 +660,4 @@ def compare_results():
         return
     
     if not os.path.exists(ga_file):
-        print("\n⚠️  No se encontró GA optimizado. Ejecuta el entrenamiento final primero")
-        return
-    
-    with open(baseline_file) as f:
-        baseline = json.load(f)
-    
-    with open(ga_file) as f:
-        ga_optimized = json.load(f)
-    
-    # Mostrar comparación
-    print("\n📈 Resultados:")
-    print(f"\n{'Métrica':<20} {'Baseline':<12} {'GA Optimizado':<15} {'Mejora':>10}")
-    print("-" * 60)
-    
-    for metric in ['f1', 'precision', 'recall', 'fp_rate', 'latency']:
-        b_val = baseline[metric]
-        g_val = ga_optimized[metric]
-        
-        # Para FP Rate y Latency, menor es mejor
-        if metric in ['fp_rate', 'latency']:
-            improvement = ((b_val - g_val) / b_val * 100) if b_val > 0 else 0
-        else:
-            improvement = ((g_val - b_val) / b_val * 100) if b_val > 0 else 0
-        
-        symbol = '✓' if improvement > 0 else '✗'
-        print(f"{metric:<20} {b_val:<12.4f} {g_val:<15.4f} {symbol} {improvement:>8.2f}%")
-    
-    # Generar gráfica
-    visualizer = GAVisualizer()
-    visualizer.plot_comparison(baseline, ga_optimized, 'comparison_final.png')
-    
-    print(f"\n💾 Gráficas guardadas en: {PLOTS_DIR}")
-
-
-# ============================================
-# FUNCIÓN PRINCIPAL
-# ============================================
-def main():
-    """Pipeline completo del sistema - MODO AUTOMÁTICO"""
-    print("\n" + "=" * 80)
-    print("🎯 SISTEMA COMPLETO DE OPTIMIZACIÓN CON GA")
-    print("=" * 80)
-    
-    print("\n🚀 Ejecutando pipeline completo automáticamente...\n")
-    
-    try:
-        # Paso 1: Baseline
-        print("\n" + "="*80)
-        print("PASO 1/4: BASELINE")
-        print("="*80)
-        baseline = train_baseline()
-        
-        # Paso 2: GA
-        print("\n" + "="*80)
-        print("PASO 2/4: ALGORITMO GENÉTICO")
-        print("="*80)
-        hof, logbook = run_genetic_algorithm(resume=False)
-        
-        if hof is None:
-            print("\n❌ Error en GA. Abortando pipeline.")
-            return
-        
-        # Paso 3: Entrenamiento final
-        print("\n" + "="*80)
-        print("PASO 3/4: ENTRENAMIENTO FINAL")
-        print("="*80)
-        best_individual = hof[0]
-        model, results, ga_metrics = train_best_model(best_individual)
-        
-        # Guardar resultados GA
-        ga_file = os.path.join(LOG_DIR, 'ga_optimized_results.json')
-        with open(ga_file, 'w') as f:
-            json.dump(ga_metrics, f, indent=2)
-        
-        # Paso 4: Comparación
-        print("\n" + "="*80)
-        print("PASO 4/4: COMPARACIÓN")
-        print("="*80)
-        compare_results()
-        
-        print("\n" + "="*80)
-        print("✅ PIPELINE COMPLETO FINALIZADO")
-        print("="*80)
-        print(f"\n📁 Resultados en:")
-        print(f"   - Logs: {LOG_DIR}")
-        print(f"   - Checkpoints: {CHECKPOINT_DIR}")
-        print(f"   - Gráficas: {PLOTS_DIR}")
-        
-    except KeyboardInterrupt:
-        print("\n\n⚠️  Ejecución interrumpida por el usuario")
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
-
-
-if __name__ == "__main__":
-    multiprocessing.freeze_support()
-    main()
+        print("\n⚠️  No se encontró GA optimizado.")
