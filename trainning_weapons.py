@@ -340,7 +340,11 @@ if csv_rows:
     print(f"  {'TOTAL':20s} | {total_imgs:8d} | {total_dets:11d} | {avg_total:6.2f}")
     
     if imagenes_sin_detecciones:
+<<<<<<< HEAD
         reporte_path = os.path.join(output_root, 'imagenes_sin_detecciones_Armas.txt')
+=======
+        reporte_path = os.path.join(output_root, 'imagenes_sin_detecciones_armas.txt')
+>>>>>>> 884687703343f1b9b7f8d5b84ce82b5d1a76c029
         with open(reporte_path, 'w', encoding='utf-8') as f:
             f.write(f"Total: {len(imagenes_sin_detecciones)}\n")
             f.write("="*60 + "\n")
