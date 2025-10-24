@@ -10,8 +10,7 @@ from collections import defaultdict
 data_dir = 'dataArmas'  # Carpeta con subcarpetas de imágenes por clase
 output_root = os.path.join('', 'resultados')
 os.makedirs(output_root, exist_ok=True)
-
-annotations_path = os.path.join(output_root, 'anotaciones.csv')
+annotations_path = os.path.join(output_root, 'anotaciones_Armas.csv')
 csv_header = ['image_filename', 'class', 'x_min', 'y_min', 'x_max', 'y_max']
 csv_rows = []
 
@@ -341,7 +340,7 @@ if csv_rows:
     print(f"  {'TOTAL':20s} | {total_imgs:8d} | {total_dets:11d} | {avg_total:6.2f}")
     
     if imagenes_sin_detecciones:
-        reporte_path = os.path.join(output_root, 'imagenes_sin_detecciones.txt')
+        reporte_path = os.path.join(output_root, 'imagenes_sin_detecciones_Armas.txt')
         with open(reporte_path, 'w', encoding='utf-8') as f:
             f.write(f"Total: {len(imagenes_sin_detecciones)}\n")
             f.write("="*60 + "\n")
