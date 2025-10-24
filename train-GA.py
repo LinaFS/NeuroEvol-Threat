@@ -696,25 +696,62 @@ def compare_results():
 # FUNCIÓN PRINCIPAL
 # ============================================
 def main():
-    """Pipeline completo del sistema"""
+    """Pipeline completo del sistema - MODO AUTOMÁTICO"""
     print("\n" + "=" * 80)
     print("🎯 SISTEMA COMPLETO DE OPTIMIZACIÓN CON GA")
     print("=" * 80)
-    print("\nMenú de opciones:")
-    print("1. Entrenar Baseline")
-    print("2. Ejecutar GA (desde cero)")
-    print("3. Reanudar GA (desde checkpoint)")
-    print("4. Entrenar modelo final con mejores parámetros")
-    print("5. Comparar resultados")
-    print("6. Pipeline completo (todo lo anterior)")
     
-    # Para ejecución automática, descomenta:
-    # option = '6'
+    print("\n🚀 Ejecutando pipeline completo automáticamente...\n")
     
-    print("\nPara ejecución automática, importa y ejecuta:")
-    print("   from yolo_ga_optimizer import train_baseline, run_genetic_algorithm")
-    print("   baseline = train_baseline()")
-    print("   hof, logbook = run_genetic_algorithm()")
+    try:
+        # Paso 1: Baseline
+        print("\n" + "="*80)
+        print("PASO 1/4: BASELINE")
+        print("="*80)
+        baseline = train_baseline()
+        
+        # Paso 2: GA
+        print("\n" + "="*80)
+        print("PASO 2/4: ALGORITMO GENÉTICO")
+        print("="*80)
+        hof, logbook = run_genetic_algorithm(resume=False)
+        
+        if hof is None:
+            print("\n❌ Error en GA. Abortando pipeline.")
+            return
+        
+        # Paso 3: Entrenamiento final
+        print("\n" + "="*80)
+        print("PASO 3/4: ENTRENAMIENTO FINAL")
+        print("="*80)
+        best_individual = hof[0]
+        model, results, ga_metrics = train_best_model(best_individual)
+        
+        # Guardar resultados GA
+        ga_file = os.path.join(LOG_DIR, 'ga_optimized_results.json')
+        with open(ga_file, 'w') as f:
+            json.dump(ga_metrics, f, indent=2)
+        
+        # Paso 4: Comparación
+        print("\n" + "="*80)
+        print("PASO 4/4: COMPARACIÓN")
+        print("="*80)
+        compare_results()
+        
+        print("\n" + "="*80)
+        print("✅ PIPELINE COMPLETO FINALIZADO")
+        print("="*80)
+        print(f"\n📁 Resultados en:")
+        print(f"   - Logs: {LOG_DIR}")
+        print(f"   - Checkpoints: {CHECKPOINT_DIR}")
+        print(f"   - Gráficas: {PLOTS_DIR}")
+        
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Ejecución interrumpida por el usuario")
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":
