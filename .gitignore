@@ -6,3 +6,6 @@ datasetSospecha/
 
 # Ignora la carpeta datasetArmas y todo su contenido
 datasetArmas/
+
+#Ignora la carpeta dataArmas y todo su contenido
+dataArmas/
