@@ -4,7 +4,15 @@ YOLOv8 con Algoritmos Genéticos - SISTEMA COMPLETO
 ✅ Visualización en tiempo real
 ✅ Checkpoints para pausar/reanudar
 ✅ Comparación con baseline
+✅ SIN ERRORES DE TKINTER
 """
+
+# ============================================
+# CONFIGURAR MATPLOTLIB ANTES DE TODO
+# ============================================
+import os
+os.environ['MPLBACKEND'] = 'Agg'
+os.environ['YOLO_VERBOSE'] = 'False'
 
 from ultralytics import YOLO
 import multiprocessing
@@ -13,9 +21,14 @@ import numpy as np
 from deap import base, creator, tools, algorithms
 import json
 import pickle
+
+# Configurar matplotlib
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+plt.ioff()
+
 from datetime import datetime
-import os
 import time
 
 # ============================================
@@ -120,131 +133,145 @@ class CheckpointManager:
 
 
 # ============================================
-# SISTEMA DE VISUALIZACIÓN
+# SISTEMA DE VISUALIZACIÓN (SEGURO)
 # ============================================
 class GAVisualizer:
     """Genera gráficas de la evolución del GA"""
     
     def __init__(self, plots_dir=PLOTS_DIR):
         self.plots_dir = plots_dir
-        plt.style.use('seaborn-v0_8-darkgrid')
+        matplotlib.use('Agg')
+        plt.ioff()
+    
+    def _safe_plot(self, plot_func):
+        """Wrapper seguro para generar plots"""
+        try:
+            plot_func()
+        except Exception as e:
+            print(f"⚠️  Error al generar gráfica: {e}")
+        finally:
+            plt.close('all')
+            plt.clf()
     
     def plot_evolution(self, logbook, filename='evolution.png'):
         """Gráfica de evolución del fitness"""
-        gen = logbook.select("gen")
-        avg_fitness = logbook.select("avg")
-        max_fitness = logbook.select("max")
-        min_fitness = logbook.select("min")
+        def _plot():
+            gen = logbook.select("gen")
+            avg_fitness = logbook.select("avg")
+            max_fitness = logbook.select("max")
+            min_fitness = logbook.select("min")
+            
+            fig, ax = plt.subplots(figsize=(12, 6))
+            
+            ax.plot(gen, max_fitness, 'g-', label='Mejor Fitness', linewidth=2)
+            ax.plot(gen, avg_fitness, 'b--', label='Fitness Promedio', linewidth=2)
+            ax.plot(gen, min_fitness, 'r:', label='Peor Fitness', linewidth=2)
+            
+            ax.fill_between(gen, min_fitness, max_fitness, alpha=0.2, color='blue')
+            
+            ax.set_xlabel('Generación', fontsize=12)
+            ax.set_ylabel('Fitness', fontsize=12)
+            ax.set_title('Evolución del Fitness por Generación', fontsize=14, fontweight='bold')
+            ax.legend(loc='best', fontsize=10)
+            ax.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            save_path = os.path.join(self.plots_dir, filename)
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"📊 Gráfica guardada: {save_path}")
         
-        fig, ax = plt.subplots(figsize=(12, 6))
-        
-        ax.plot(gen, max_fitness, 'g-', label='Mejor Fitness', linewidth=2)
-        ax.plot(gen, avg_fitness, 'b--', label='Fitness Promedio', linewidth=2)
-        ax.plot(gen, min_fitness, 'r:', label='Peor Fitness', linewidth=2)
-        
-        ax.fill_between(gen, min_fitness, max_fitness, alpha=0.2, color='blue')
-        
-        ax.set_xlabel('Generación', fontsize=12)
-        ax.set_ylabel('Fitness', fontsize=12)
-        ax.set_title('Evolución del Fitness por Generación', fontsize=14, fontweight='bold')
-        ax.legend(loc='best', fontsize=10)
-        ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        save_path = os.path.join(self.plots_dir, filename)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"📊 Gráfica guardada: {save_path}")
+        self._safe_plot(_plot)
     
     def plot_hyperparams_distribution(self, hof, filename='hyperparams_dist.png'):
         """Distribución de hiperparámetros en los mejores individuos"""
         if len(hof) == 0:
             return
         
-        params = {
-            'lr0': [ind[0] for ind in hof],
-            'batch': [int(ind[1]) for ind in hof],
-            'conf': [ind[2] for ind in hof],
-            'iou': [ind[3] for ind in hof]
-        }
+        def _plot():
+            params = {
+                'lr0': [ind[0] for ind in hof],
+                'batch': [int(ind[1]) for ind in hof],
+                'conf': [ind[2] for ind in hof],
+                'iou': [ind[3] for ind in hof]
+            }
+            
+            fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+            fig.suptitle('Distribución de Hiperparámetros (Top 3)', 
+                         fontsize=14, fontweight='bold')
+            
+            colors = ['#2ecc71', '#3498db', '#e74c3c']
+            
+            for idx, (param_name, values) in enumerate(params.items()):
+                ax = axes[idx // 2, idx % 2]
+                ax.bar(range(len(values)), values, color=colors[:len(values)], alpha=0.7)
+                ax.set_title(param_name.upper(), fontsize=12, fontweight='bold')
+                ax.set_xlabel('Ranking', fontsize=10)
+                ax.set_ylabel('Valor', fontsize=10)
+                ax.set_xticks(range(len(values)))
+                ax.set_xticklabels([f'#{i+1}' for i in range(len(values))])
+                ax.grid(True, alpha=0.3, axis='y')
+            
+            plt.tight_layout()
+            save_path = os.path.join(self.plots_dir, filename)
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"📊 Gráfica guardada: {save_path}")
         
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-        fig.suptitle('Distribución de Hiperparámetros (Top 3)', 
-                     fontsize=14, fontweight='bold')
-        
-        colors = ['#2ecc71', '#3498db', '#e74c3c']
-        
-        for idx, (param_name, values) in enumerate(params.items()):
-            ax = axes[idx // 2, idx % 2]
-            ax.bar(range(len(values)), values, color=colors[:len(values)], alpha=0.7)
-            ax.set_title(param_name.upper(), fontsize=12, fontweight='bold')
-            ax.set_xlabel('Ranking', fontsize=10)
-            ax.set_ylabel('Valor', fontsize=10)
-            ax.set_xticks(range(len(values)))
-            ax.set_xticklabels([f'#{i+1}' for i in range(len(values))])
-            ax.grid(True, alpha=0.3, axis='y')
-        
-        plt.tight_layout()
-        save_path = os.path.join(self.plots_dir, filename)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"📊 Gráfica guardada: {save_path}")
+        self._safe_plot(_plot)
     
     def plot_comparison(self, baseline_results, ga_results, filename='comparison.png'):
         """Compara resultados baseline vs GA optimizado"""
-        metrics = ['F1-Score', 'Precision', 'Recall', 'FP Rate', 'Latency (ms)']
+        def _plot():
+            metrics = ['F1-Score', 'Precision', 'Recall', 'FP Rate', 'Latency (ms)']
+            
+            baseline_vals = [
+                baseline_results.get('f1', 0),
+                baseline_results.get('precision', 0),
+                baseline_results.get('recall', 0),
+                baseline_results.get('fp_rate', 0),
+                baseline_results.get('latency', 0) * 1000
+            ]
+            
+            ga_vals = [
+                ga_results.get('f1', 0),
+                ga_results.get('precision', 0),
+                ga_results.get('recall', 0),
+                ga_results.get('fp_rate', 0),
+                ga_results.get('latency', 0) * 1000
+            ]
+            
+            x = np.arange(len(metrics))
+            width = 0.35
+            
+            fig, ax = plt.subplots(figsize=(14, 7))
+            
+            bars1 = ax.bar(x - width/2, baseline_vals, width, label='Baseline', 
+                           color='#95a5a6', alpha=0.8)
+            bars2 = ax.bar(x + width/2, ga_vals, width, label='GA Optimizado', 
+                           color='#2ecc71', alpha=0.8)
+            
+            ax.set_xlabel('Métricas', fontsize=12, fontweight='bold')
+            ax.set_ylabel('Valor', fontsize=12, fontweight='bold')
+            ax.set_title('Comparación: Baseline vs GA Optimizado', 
+                         fontsize=14, fontweight='bold')
+            ax.set_xticks(x)
+            ax.set_xticklabels(metrics, rotation=15, ha='right')
+            ax.legend(fontsize=11)
+            ax.grid(True, alpha=0.3, axis='y')
+            
+            # Agregar valores sobre las barras
+            for bars in [bars1, bars2]:
+                for bar in bars:
+                    height = bar.get_height()
+                    ax.text(bar.get_x() + bar.get_width()/2., height,
+                           f'{height:.3f}',
+                           ha='center', va='bottom', fontsize=9)
+            
+            plt.tight_layout()
+            save_path = os.path.join(self.plots_dir, filename)
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"📊 Gráfica de comparación guardada: {save_path}")
         
-        baseline_vals = [
-            baseline_results.get('f1', 0),
-            baseline_results.get('precision', 0),
-            baseline_results.get('recall', 0),
-            baseline_results.get('fp_rate', 0),
-            baseline_results.get('latency', 0) * 1000
-        ]
-        
-        ga_vals = [
-            ga_results.get('f1', 0),
-            ga_results.get('precision', 0),
-            ga_results.get('recall', 0),
-            ga_results.get('fp_rate', 0),
-            ga_results.get('latency', 0) * 1000
-        ]
-        
-        x = np.arange(len(metrics))
-        width = 0.35
-        
-        fig, ax = plt.subplots(figsize=(14, 7))
-        
-        bars1 = ax.bar(x - width/2, baseline_vals, width, label='Baseline', 
-                       color='#95a5a6', alpha=0.8)
-        bars2 = ax.bar(x + width/2, ga_vals, width, label='GA Optimizado', 
-                       color='#2ecc71', alpha=0.8)
-        
-        ax.set_xlabel('Métricas', fontsize=12, fontweight='bold')
-        ax.set_ylabel('Valor', fontsize=12, fontweight='bold')
-        ax.set_title('Comparación: Baseline vs GA Optimizado', 
-                     fontsize=14, fontweight='bold')
-        ax.set_xticks(x)
-        ax.set_xticklabels(metrics, rotation=15, ha='right')
-        ax.legend(fontsize=11)
-        ax.grid(True, alpha=0.3, axis='y')
-        
-        # Agregar valores sobre las barras
-        for bars in [bars1, bars2]:
-            for bar in bars:
-                height = bar.get_height()
-                ax.text(bar.get_x() + bar.get_width()/2., height,
-                       f'{height:.3f}',
-                       ha='center', va='bottom', fontsize=9)
-        
-        plt.tight_layout()
-        save_path = os.path.join(self.plots_dir, filename)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"📊 Gráfica de comparación guardada: {save_path}")
+        self._safe_plot(_plot)
 
 
 # ============================================
@@ -320,7 +347,9 @@ def evaluate_individual(individual: list) -> tuple:
         'cache': HARDWARE_CONFIG['cache'],
         'verbose': False,
         'patience': 0,
-        'name': f'ga_gen{current_generation}_ind{individual_counter}'
+        'name': f'ga_gen{current_generation}_ind{individual_counter}',
+        'plots': False,  # ← DESACTIVAR PLOTS
+        'save': False    # ← NO GUARDAR CHECKPOINTS INTERMEDIOS
     }
     
     try:
@@ -331,30 +360,19 @@ def evaluate_individual(individual: list) -> tuple:
         start_time = time.time()
         
         model = YOLO(BASE_MODEL)
-        training_results = model.train(
-            lr0=params['lr0'],
-            batch=params['batch'],
-            epochs=params['epochs'],
-            data=params['data'],
-            device=params['device'],
-            workers=params['workers'],
-            cache=params['cache'],
-            verbose=params['verbose'],
-            patience=params['patience'],
-            name=params['name']
-        )
+        training_results = model.train(**params)
         
         results = model.val(
             data=params['data'],
             conf=params['conf'],
             iou=params['iou'],
             device=params['device'],
-            verbose=False
+            verbose=False,
+            plots=False  # ← DESACTIVAR PLOTS EN VALIDACIÓN
         )
         
         eval_time = time.time() - start_time
         
-        # ✅ CORRECCIÓN: Usar .mean() para obtener promedio de todas las clases
         f1_score = float(results.box.f1.mean()) if results.box.f1 is not None else 0.0
         precision = float(results.box.p.mean()) if results.box.p is not None else 0.0
         recall = float(results.box.r.mean()) if results.box.r is not None else 0.0
@@ -429,12 +447,16 @@ def train_baseline():
         workers=HARDWARE_CONFIG['workers'],
         cache=HARDWARE_CONFIG['cache'],
         name='baseline',
-        verbose=False
+        verbose=False,
+        plots=False,  # ← DESACTIVAR PLOTS
+        save=False    # ← NO GUARDAR
     )
     
-    val_results = model.val(data=DATASET_PATH)
+    val_results = model.val(
+        data=DATASET_PATH,
+        plots=False  # ← DESACTIVAR PLOTS
+    )
     
-    # ✅ CORRECCIÓN: Usar .mean() para todas las métricas
     baseline_metrics = {
         'f1': float(val_results.box.f1.mean()) if val_results.box.f1 is not None else 0.0,
         'precision': float(val_results.box.p.mean()) if val_results.box.p is not None else 0.0,
@@ -448,7 +470,6 @@ def train_baseline():
     print(f"   Precision: {baseline_metrics['precision']:.4f}")
     print(f"   FP Rate: {baseline_metrics['fp_rate']:.4f}")
     
-    # Guardar baseline
     baseline_file = os.path.join(LOG_DIR, 'baseline_results.json')
     with open(baseline_file, 'w') as f:
         json.dump(baseline_metrics, f, indent=2)
@@ -470,12 +491,10 @@ def run_genetic_algorithm(resume=False):
     print("🧬 ALGORITMO GENÉTICO PARA OPTIMIZACIÓN DE YOLOv8")
     print("=" * 80)
     
-    # Verificar dataset
     if not os.path.exists(DATASET_PATH):
         print(f"\n❌ ERROR: No se encontró {DATASET_PATH}")
         return None, None
     
-    # Intentar reanudar desde checkpoint
     if resume and checkpoint_mgr.exists():
         print("\n🔄 Reanudando desde checkpoint...")
         checkpoint = checkpoint_mgr.load()
@@ -509,7 +528,6 @@ def run_genetic_algorithm(resume=False):
     
     print(f"\n🚀 Iniciando evolución desde generación {start_gen}...\n")
     
-    # Evolución con checkpoints
     for gen in range(start_gen, GA_CONFIG['generations']):
         current_generation = gen
         individual_counter = 0
@@ -518,16 +536,13 @@ def run_genetic_algorithm(resume=False):
         print(f"GENERACIÓN {gen + 1}/{GA_CONFIG['generations']}")
         print(f"{'='*80}")
         
-        # Evaluar población
         invalid_ind = [ind for ind in population if not ind.fitness.valid]
         fitnesses = map(toolbox.evaluate, invalid_ind)
         for ind, fit in zip(invalid_ind, fitnesses):
             ind.fitness.values = fit
         
-        # Actualizar Hall of Fame
         hof.update(population)
         
-        # Registrar estadísticas
         record = stats.compile(population)
         logbook.record(gen=gen, evals=len(invalid_ind), **record)
         
@@ -536,14 +551,11 @@ def run_genetic_algorithm(resume=False):
         print(f"   Promedio: {record['avg']:.4f}")
         print(f"   Peor: {record['min']:.4f}")
         
-        # ✅ CORRECCIÓN: No pasar stats al checkpoint
         checkpoint_mgr.save(gen, population, hof, logbook)
         
-        # Generar gráficas
         if gen > 0:
             visualizer.plot_evolution(logbook, f'evolution_gen{gen}.png')
         
-        # Siguiente generación
         if gen < GA_CONFIG['generations'] - 1:
             offspring = toolbox.select(population, len(population))
             offspring = list(map(toolbox.clone, offspring))
@@ -561,11 +573,9 @@ def run_genetic_algorithm(resume=False):
             
             population[:] = offspring
     
-    # Gráficas finales
     visualizer.plot_evolution(logbook, 'evolution_final.png')
     visualizer.plot_hyperparams_distribution(hof, 'hyperparams_final.png')
     
-    # Mostrar mejores individuos
     print("\n" + "=" * 80)
     print("🏆 MEJORES INDIVIDUOS")
     print("=" * 80)
@@ -574,7 +584,6 @@ def run_genetic_algorithm(resume=False):
         print(f"   LR: {ind[0]:.6f}, Batch: {int(ind[1])}, "
               f"Conf: {ind[2]:.4f}, IoU: {ind[3]:.4f}")
     
-    # Guardar mejores individuos
     best_file = os.path.join(LOG_DIR, 'best_individuals.json')
     with open(best_file, 'w') as f:
         json.dump([{
@@ -615,19 +624,26 @@ def train_best_model(best_individual, epochs=None):
         'cache': HARDWARE_CONFIG['cache'],
         'name': 'best_model_ga_optimized',
         'verbose': True,
+        'plots': False,  # ← DESACTIVAR PLOTS (o True si quieres gráficas finales)
+        'save': True     # ← GUARDAR MODELO FINAL
     }
     
     print(f"\n📊 Hiperparámetros optimizados:")
     for k, v in params.items():
-        if k not in ['data', 'device', 'workers', 'cache', 'verbose']:
+        if k not in ['data', 'device', 'workers', 'cache', 'verbose', 'plots', 'save']:
             print(f"   {k}: {v}")
+    
+    print("\n⚠️  ENTRENAMIENTO DE 50 ÉPOCAS - ESTO TOMARÁ TIEMPO")
+    print("   Puedes ver el progreso a continuación...\n")
     
     model = YOLO(BASE_MODEL)
     results = model.train(**params)
     
-    val_results = model.val(data=params['data'])
+    val_results = model.val(
+        data=params['data'],
+        plots=False  # ← DESACTIVAR PLOTS
+    )
     
-    # ✅ CORRECCIÓN: Usar .mean() para todas las métricas
     ga_metrics = {
         'f1': float(val_results.box.f1.mean()) if val_results.box.f1 is not None else 0.0,
         'precision': float(val_results.box.p.mean()) if val_results.box.p is not None else 0.0,
@@ -651,7 +667,6 @@ def compare_results():
     print("📊 COMPARACIÓN: BASELINE VS GA OPTIMIZADO")
     print("=" * 80)
     
-    # Cargar resultados
     baseline_file = os.path.join(LOG_DIR, 'baseline_results.json')
     ga_file = os.path.join(LOG_DIR, 'ga_optimized_results.json')
     
@@ -660,4 +675,165 @@ def compare_results():
         return
     
     if not os.path.exists(ga_file):
-        print("\n⚠️  No se encontró GA optimizado.")
+        print("\n⚠️  No se encontró GA optimizado. Ejecuta el entrenamiento final primero")
+        return
+    
+    with open(baseline_file) as f:
+        baseline = json.load(f)
+    
+    with open(ga_file) as f:
+        ga_optimized = json.load(f)
+    
+    print("\n📈 Resultados:")
+    print(f"\n{'Métrica':<20} {'Baseline':<12} {'GA Optimizado':<15} {'Mejora':>10}")
+    print("-" * 60)
+    
+    for metric in ['f1', 'precision', 'recall', 'fp_rate', 'latency']:
+        b_val = baseline[metric]
+        g_val = ga_optimized[metric]
+        
+        if metric in ['fp_rate', 'latency']:
+            improvement = ((b_val - g_val) / b_val * 100) if b_val > 0 else 0
+        else:
+            improvement = ((g_val - b_val) / b_val * 100) if b_val > 0 else 0
+        
+        symbol = '✓' if improvement > 0 else '✗'
+        print(f"{metric:<20} {b_val:<12.4f} {g_val:<15.4f} {symbol} {improvement:>8.2f}%")
+    
+    visualizer = GAVisualizer()
+    visualizer.plot_comparison(baseline, ga_optimized, 'comparison_final.png')
+    
+    print(f"\n💾 Gráficas guardadas en: {PLOTS_DIR}")
+
+
+# ============================================
+# FUNCIÓN PRINCIPAL
+# ============================================
+def main():
+    """Pipeline completo del sistema - MODO AUTOMÁTICO"""
+    print("\n" + "=" * 80)
+    print("🎯 SISTEMA COMPLETO DE OPTIMIZACIÓN CON GA")
+    print("=" * 80)
+    
+    print("\n🚀 Ejecutando pipeline completo automáticamente...\n")
+    
+    try:
+        # Paso 1: Baseline
+        print("\n" + "="*80)
+        print("PASO 1/4: BASELINE")
+        print("="*80)
+        baseline = train_baseline()
+        
+        # Paso 2: GA
+        print("\n" + "="*80)
+        print("PASO 2/4: ALGORITMO GENÉTICO")
+        print("="*80)
+        hof, logbook = run_genetic_algorithm(resume=False)
+        
+        if hof is None:
+            print("\n❌ Error en GA. Abortando pipeline.")
+            return
+        
+        # Paso 3: Entrenamiento final
+        print("\n" + "="*80)
+        print("PASO 3/4: ENTRENAMIENTO FINAL")
+        print("="*80)
+        best_individual = hof[0]
+        model, results, ga_metrics = train_best_model(best_individual)
+        
+        # Guardar resultados GA
+        ga_file = os.path.join(LOG_DIR, 'ga_optimized_results.json')
+        with open(ga_file, 'w') as f:
+            json.dump(ga_metrics, f, indent=2)
+        
+        # Paso 4: Comparación
+        print("\n" + "="*80)
+        print("PASO 4/4: COMPARACIÓN")
+        print("="*80)
+        compare_results()
+        
+        print("\n" + "="*80)
+        print("✅ PIPELINE COMPLETO FINALIZADO")
+        print("="*80)
+        print(f"\n📁 Resultados en:")
+        print(f"   - Logs: {LOG_DIR}")
+        print(f"   - Checkpoints: {CHECKPOINT_DIR}")
+        print(f"   - Gráficas: {PLOTS_DIR}")
+        
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Ejecución interrumpida por el usuario")
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Limpiar recursos matplotlib
+        plt.close('all')
+        import gc
+        gc.collect()
+
+
+# ============================================
+# FUNCIÓN PARA COMPLETAR ENTRENAMIENTO FINAL
+# ============================================
+def complete_final_training():
+    """Completa el entrenamiento final si fue interrumpido"""
+    print("\n" + "=" * 80)
+    print("🔄 COMPLETAR ENTRENAMIENTO FINAL")
+    print("=" * 80)
+    
+    # Cargar mejores individuos
+    best_file = os.path.join(LOG_DIR, 'best_individuals.json')
+    if not os.path.exists(best_file):
+        print("\n❌ No se encontraron mejores individuos del GA")
+        print("   Ejecuta primero: run_genetic_algorithm()")
+        return
+    
+    with open(best_file) as f:
+        best_data = json.load(f)
+    
+    if len(best_data) == 0:
+        print("\n❌ No hay individuos en el Hall of Fame")
+        return
+    
+    # Reconstruir mejor individuo
+    best_params = best_data[0]['hyperparams']
+    best_individual = [
+        best_params['lr0'],
+        best_params['batch'],
+        best_params['conf'],
+        best_params['iou']
+    ]
+    
+    print(f"\n✅ Mejor individuo cargado:")
+    print(f"   LR: {best_individual[0]:.6f}")
+    print(f"   Batch: {int(best_individual[1])}")
+    print(f"   Conf: {best_individual[2]:.4f}")
+    print(f"   IoU: {best_individual[3]:.4f}")
+    print(f"   Fitness: {best_data[0]['fitness']:.4f}")
+    
+    # Entrenar modelo final
+    model, results, ga_metrics = train_best_model(best_individual)
+    
+    # Guardar resultados
+    ga_file = os.path.join(LOG_DIR, 'ga_optimized_results.json')
+    with open(ga_file, 'w') as f:
+        json.dump(ga_metrics, f, indent=2)
+    
+    print("\n✅ Entrenamiento final completado")
+    print("   Ahora puedes ejecutar: compare_results()")
+    
+    return model, results, ga_metrics
+
+
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
+    
+    # Si ya tienes el GA completo, solo ejecuta el entrenamiento final:
+    complete_final_training()
+    
+    # O ejecuta el pipeline completo:
+   # main()
+    
+    # Limpiar al final
+    plt.close('all')
