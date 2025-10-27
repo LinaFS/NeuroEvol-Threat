@@ -9,3 +9,6 @@ datasetArmas/
 
 #Ignora la carpeta dataArmas y todo su contenido
 dataArmas/
+
+#Ignora el cache de python
+__pycache__/

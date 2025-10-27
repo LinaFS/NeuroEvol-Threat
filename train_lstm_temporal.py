@@ -1,7 +1,6 @@
 """
 train_lstm_temporal.py - Entrenamiento del modelo LSTM para comportamientos
-
-Este script entrena el modelo LSTM usando tus datos reales o sintéticos
+VERSIÓN CORREGIDA - Compatible con PyTorch 1.x y 2.x
 """
 
 import torch
@@ -16,7 +15,7 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
 
-# Importar modelo desde main_temporal.py
+# Importar configuración de clases
 import sys
 sys.path.append('.')
 from classes_config import BEHAVIOR_CLASSES
@@ -46,7 +45,7 @@ class TrainConfig:
     
     # Hardware
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    NUM_WORKERS = 4
+    NUM_WORKERS = 0  # Cambiado a 0 para evitar problemas en Windows
     
     # Output
     MODEL_DIR = 'models'
@@ -55,13 +54,120 @@ class TrainConfig:
 
 config = TrainConfig()
 
+
+# ============================================
+# MODELO LSTM
+# ============================================
+class BehaviorLSTM(nn.Module):
+    """
+    Modelo LSTM para clasificación de comportamientos temporales
+    """
+    def __init__(self, input_dim=20, hidden_dim=128, num_layers=2, num_classes=6, dropout=0.3):
+        super(BehaviorLSTM, self).__init__()
+        
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.num_classes = num_classes
+        
+        # LSTM
+        self.lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0,
+            bidirectional=False
+        )
+        
+        # Capas de clasificación
+        self.fc1 = nn.Linear(hidden_dim, hidden_dim // 2)
+        self.dropout = nn.Dropout(dropout)
+        self.fc2 = nn.Linear(hidden_dim // 2, num_classes)
+        
+        # Normalización
+        self.batch_norm = nn.BatchNorm1d(hidden_dim // 2)
+        
+    def forward(self, x):
+        """
+        Args:
+            x: (batch_size, seq_len, input_dim)
+        Returns:
+            output: (batch_size, num_classes)
+            hidden: hidden state
+        """
+        # LSTM
+        lstm_out, (hidden, cell) = self.lstm(x)
+        
+        # Tomar último output
+        last_output = lstm_out[:, -1, :]
+        
+        # Clasificación
+        out = self.fc1(last_output)
+        out = self.batch_norm(out)
+        out = F.relu(out)
+        out = self.dropout(out)
+        out = self.fc2(out)
+        
+        return out, hidden
+
+
+# ============================================
+# MAPEO DE CLASES
+# ============================================
+# Mapeo de 21 clases de comportamiento a 6 categorías principales
+BEHAVIOR_MAPPING = {
+    # Normal (0)
+    'Normal_Videos': 0,
+    'Walking': 0,
+    'Clapping': 0,
+    'Walking_While_Reading_Book': 0,
+    'Walking_While_Using_Phone': 0,
+    'Sitting': 0,
+    'Standing_Still': 0,
+    
+    # Loitering (1)
+    'Meet_and_Split': 1,
+    
+    # Aggression (2)
+    'Abuse': 2,
+    'Assault': 2,
+    'Fighting': 2,
+    
+    # Weapon Carry (3)
+    'Shooting': 3,
+    
+    # Erratic Movement (4)
+    'Burglary': 4,
+    'Stealing': 4,
+    'Shoplifting': 4,
+    'Vandalism': 4,
+    'Arrest': 4,
+    
+    # Critical (5)
+    'Arson': 5,
+    'Explosion': 5,
+    'Robbery': 5,
+    'RoadAccidents': 5,
+}
+
+# Clases principales para el LSTM
+LSTM_CLASSES = {
+    0: 'normal',
+    1: 'loitering',
+    2: 'aggression',
+    3: 'weapon_carry',
+    4: 'erratic_movement',
+    5: 'critical'
+}
+
+
 # ============================================
 # GENERADOR DE DATOS SINTÉTICOS
 # ============================================
 class SyntheticDataGenerator:
     """
     Genera datos sintéticos para entrenar el modelo
-    Útil cuando no tienes un dataset anotado aún
     """
     
     def __init__(self, num_samples=1000):
@@ -72,10 +178,16 @@ class SyntheticDataGenerator:
         """Generar dataset sintético"""
         samples = []
         
-        for _ in range(self.num_samples):
+        print("   Generando muestras sintéticas...")
+        
+        for i in range(self.num_samples):
+            # Mostrar progreso
+            if (i + 1) % 200 == 0:
+                print(f"      {i+1}/{self.num_samples} muestras generadas")
+            
             # Seleccionar comportamiento aleatorio
             behavior_id = np.random.randint(0, 6)
-            behavior = BEHAVIOR_CLASSES[behavior_id]
+            behavior = LSTM_CLASSES[behavior_id]
             
             # Generar secuencia basada en comportamiento
             sequence = self._generate_behavior_sequence(behavior)
@@ -85,6 +197,8 @@ class SyntheticDataGenerator:
                 'label': behavior_id,
                 'behavior': behavior
             })
+        
+        print(f"      {self.num_samples}/{self.num_samples} muestras generadas")
         
         return samples
     
@@ -116,7 +230,7 @@ class SyntheticDataGenerator:
                     100.0,         # min_distance
                     0.0,           # interaction_duration
                     0.0            # zone_visited
-                ])
+                ], dtype=np.float32)
                 sequence.append(features)
         
         elif behavior == 'loitering':
@@ -144,7 +258,7 @@ class SyntheticDataGenerator:
                     100.0,
                     0.0,
                     1.0
-                ])
+                ], dtype=np.float32)
                 sequence.append(features)
         
         elif behavior == 'aggression':
@@ -171,7 +285,7 @@ class SyntheticDataGenerator:
                     30.0,
                     1.0,
                     2.0
-                ])
+                ], dtype=np.float32)
                 sequence.append(features)
         
         elif behavior == 'weapon_carry':
@@ -198,7 +312,7 @@ class SyntheticDataGenerator:
                     100.0,
                     0.0,
                     1.0
-                ])
+                ], dtype=np.float32)
                 sequence.append(features)
         
         elif behavior == 'erratic_movement':
@@ -225,37 +339,38 @@ class SyntheticDataGenerator:
                     50.0,
                     0.5,
                     2.0
-                ])
+                ], dtype=np.float32)
                 sequence.append(features)
         
-        else:  # abandoned_object
-            # Objeto estático prolongado
+        else:  # critical
+            # Eventos críticos (explosión, incendio, etc.)
             for i in range(self.window_size):
                 features = np.array([
-                    0.5,
-                    0.5,
-                    0.01,
-                    0.01,
-                    0.005,
+                    0.5 + np.random.randn()*0.2,
+                    0.5 + np.random.randn()*0.2,
+                    0.20,  # Muy alta variación
+                    0.20,
+                    0.08,
                     0.0,
-                    0.1,   # Casi sin movimiento
-                    0.2,
-                    0.05,
-                    0.01,
-                    0.05,
-                    0.0,   # Sin cambios de dirección
-                    15.0,  # Tiempo muy prolongado
-                    2.0,
+                    15.0,  # Velocidad muy alta
+                    20.0,
+                    5.0,
+                    10.0,
                     15.0,
+                    8.0,
+                    1.5,
+                    200.0,
+                    1.5,
                     30.0,
-                    0.0,
-                    100.0,
-                    0.0,
-                    1.0
-                ])
+                    3.0,
+                    20.0,
+                    0.8,
+                    3.0
+                ], dtype=np.float32)
                 sequence.append(features)
         
-        return np.array(sequence)
+        return np.array(sequence, dtype=np.float32)
+
 
 # ============================================
 # DATASET
@@ -277,6 +392,7 @@ class TemporalBehaviorDataset(Dataset):
         
         return features, label
 
+
 # ============================================
 # ENTRENAMIENTO
 # ============================================
@@ -294,12 +410,13 @@ class Trainer:
             lr=config.LEARNING_RATE,
             weight_decay=config.WEIGHT_DECAY
         )
+        
+        # CORRECCIÓN: Remover 'verbose' que no existe en versiones antiguas
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
             mode='max',
             patience=5,
-            factor=0.5,
-            verbose=True
+            factor=0.5
         )
         
         self.history = {
@@ -331,6 +448,7 @@ class Trainer:
             
             # Backward
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
             
             # Métricas
@@ -388,7 +506,7 @@ class Trainer:
         print(f"   Device: {config.DEVICE}")
         print(f"   Train samples: {len(self.train_loader.dataset)}")
         print(f"   Val samples: {len(self.val_loader.dataset)}")
-        print("="*60)
+        print("="*70)
         
         for epoch in range(epochs):
             print(f"\n📍 Época {epoch+1}/{epochs}")
@@ -422,10 +540,10 @@ class Trainer:
             if (epoch + 1) % 10 == 0:
                 self.save_checkpoint(epoch, f'epoch_{epoch+1}')
         
-        print("\n" + "="*60)
+        print("\n" + "="*70)
         print(f"✅ Entrenamiento completado!")
         print(f"   Mejor Val Acc: {self.best_val_acc:.2f}%")
-        print("="*60)
+        print("="*70)
         
         return self.history
     
@@ -439,11 +557,19 @@ class Trainer:
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
             'best_val_acc': self.best_val_acc,
-            'history': self.history
+            'history': self.history,
+            'config': {
+                'input_dim': config.INPUT_DIM,
+                'hidden_dim': config.HIDDEN_DIM,
+                'num_layers': config.NUM_LAYERS,
+                'num_classes': config.NUM_CLASSES,
+                'dropout': config.DROPOUT
+            }
         }
         
         path = Path(config.CHECKPOINT_DIR) / f'{name}.pth'
         torch.save(checkpoint, path)
+
 
 # ============================================
 # EVALUACIÓN
@@ -479,14 +605,14 @@ class Evaluator:
                 all_probs.extend(probs.cpu().numpy())
         
         # Reporte de clasificación
-        print("\n" + "="*60)
+        print("\n" + "="*70)
         print("📈 REPORTE DE CLASIFICACIÓN")
-        print("="*60)
+        print("="*70)
         
         report = classification_report(
             all_labels,
             all_preds,
-            target_names=list(BEHAVIOR_CLASSES.values()),
+            target_names=list(LSTM_CLASSES.values()),
             digits=3
         )
         print(report)
@@ -509,8 +635,8 @@ class Evaluator:
             annot=True,
             fmt='d',
             cmap='Blues',
-            xticklabels=list(BEHAVIOR_CLASSES.values()),
-            yticklabels=list(BEHAVIOR_CLASSES.values()),
+            xticklabels=list(LSTM_CLASSES.values()),
+            yticklabels=list(LSTM_CLASSES.values()),
             cbar_kws={'label': 'Count'}
         )
         plt.ylabel('True Label', fontsize=12)
@@ -532,7 +658,7 @@ class Evaluator:
             labels, preds, average=None
         )
         
-        behaviors = list(BEHAVIOR_CLASSES.values())
+        behaviors = list(LSTM_CLASSES.values())
         x = np.arange(len(behaviors))
         width = 0.25
         
@@ -556,8 +682,9 @@ class Evaluator:
         
         print(f"💾 Métricas por clase guardadas en: {config.PLOTS_DIR}/per_class_metrics.png")
 
+
 # ============================================
-# VISUALIZACIÓN DE ENTRENAMIENTO
+# VISUALIZACIÓN
 # ============================================
 def plot_training_history(history):
     """Plotear historial de entrenamiento"""
@@ -566,21 +693,21 @@ def plot_training_history(history):
     epochs = range(1, len(history['train_loss']) + 1)
     
     # Loss
-    ax1.plot(epochs, history['train_loss'], 'b-', label='Train Loss')
-    ax1.plot(epochs, history['val_loss'], 'r-', label='Val Loss')
-    ax1.set_xlabel('Epoch')
-    ax1.set_ylabel('Loss')
-    ax1.set_title('Training and Validation Loss')
-    ax1.legend()
+    ax1.plot(epochs, history['train_loss'], 'b-', label='Train Loss', linewidth=2)
+    ax1.plot(epochs, history['val_loss'], 'r-', label='Val Loss', linewidth=2)
+    ax1.set_xlabel('Epoch', fontsize=12)
+    ax1.set_ylabel('Loss', fontsize=12)
+    ax1.set_title('Training and Validation Loss', fontsize=14)
+    ax1.legend(fontsize=11)
     ax1.grid(True, alpha=0.3)
     
     # Accuracy
-    ax2.plot(epochs, history['train_acc'], 'b-', label='Train Acc')
-    ax2.plot(epochs, history['val_acc'], 'r-', label='Val Acc')
-    ax2.set_xlabel('Epoch')
-    ax2.set_ylabel('Accuracy (%)')
-    ax2.set_title('Training and Validation Accuracy')
-    ax2.legend()
+    ax2.plot(epochs, history['train_acc'], 'b-', label='Train Acc', linewidth=2)
+    ax2.plot(epochs, history['val_acc'], 'r-', label='Val Acc', linewidth=2)
+    ax2.set_xlabel('Epoch', fontsize=12)
+    ax2.set_ylabel('Accuracy (%)', fontsize=12)
+    ax2.set_title('Training and Validation Accuracy', fontsize=14)
+    ax2.legend(fontsize=11)
     ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()
@@ -589,7 +716,8 @@ def plot_training_history(history):
     plt.savefig(Path(config.PLOTS_DIR) / 'training_history.png', dpi=300)
     plt.close()
     
-    print(f"💾 Historial de entrenamiento guardado en: {config.PLOTS_DIR}/training_history.png")
+    print(f"💾 Historial guardado en: {config.PLOTS_DIR}/training_history.png")
+
 
 # ============================================
 # FUNCIÓN PRINCIPAL
@@ -597,10 +725,10 @@ def plot_training_history(history):
 def main():
     """Función principal"""
     
-    print("="*60)
+    print("="*70)
     print("🧠 ENTRENAMIENTO DE MODELO LSTM TEMPORAL")
     print("   NeuroEvol-Threat - Behavioral Analysis")
-    print("="*60)
+    print("="*70)
     
     # Crear directorios
     Path(config.MODEL_DIR).mkdir(exist_ok=True)
@@ -617,8 +745,8 @@ def main():
     train_samples = all_samples[:split_idx]
     val_samples = all_samples[split_idx:]
     
-    print(f"   Train: {len(train_samples)} muestras")
-    print(f"   Val: {len(val_samples)} muestras")
+    print(f"   ✅ Train: {len(train_samples)} muestras")
+    print(f"   ✅ Val: {len(val_samples)} muestras")
     
     # Datasets y DataLoaders
     train_dataset = TemporalBehaviorDataset(train_samples)
@@ -628,18 +756,20 @@ def main():
         train_dataset,
         batch_size=config.BATCH_SIZE,
         shuffle=True,
-        num_workers=0  # Cambiar a config.NUM_WORKERS si tienes problemas
+        num_workers=config.NUM_WORKERS,
+        pin_memory=True if config.DEVICE == 'cuda' else False
     )
     
     val_loader = DataLoader(
         val_dataset,
         batch_size=config.BATCH_SIZE,
         shuffle=False,
-        num_workers=0
+        num_workers=config.NUM_WORKERS,
+        pin_memory=True if config.DEVICE == 'cuda' else False
     )
     
     # Modelo
-    print("\n🏗️  Construyendo modelo...")
+    print("\n🏗️  Construyendo modelo LSTM...")
     model = BehaviorLSTM(
         input_dim=config.INPUT_DIM,
         hidden_dim=config.HIDDEN_DIM,
@@ -653,6 +783,7 @@ def main():
     
     print(f"   Total parámetros: {total_params:,}")
     print(f"   Parámetros entrenables: {trainable_params:,}")
+    print(f"   Device: {config.DEVICE}")
     
     # Entrenar
     trainer = Trainer(model, train_loader, val_loader)
@@ -663,23 +794,34 @@ def main():
     
     # Guardar modelo final
     final_model_path = Path(config.MODEL_DIR) / 'behavior_lstm_final.pth'
-    torch.save(model.state_dict(), final_model_path)
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'config': {
+            'input_dim': config.INPUT_DIM,
+            'hidden_dim': config.HIDDEN_DIM,
+            'num_layers': config.NUM_LAYERS,
+            'num_classes': config.NUM_CLASSES,
+            'dropout': config.DROPOUT
+        },
+        'lstm_classes': LSTM_CLASSES,
+        'behavior_mapping': BEHAVIOR_MAPPING
+    }, final_model_path)
     print(f"\n💾 Modelo final guardado en: {final_model_path}")
     
     # Evaluación final
     evaluator = Evaluator(model, val_loader)
     evaluator.evaluate()
     
-    print("\n" + "="*60)
+    print("\n" + "="*70)
     print("✅ PROCESO COMPLETADO")
-    print("="*60)
-    print("\nArchivos generados:")
-    print(f"  📁 Modelo: {final_model_path}")
-    print(f"  📁 Checkpoints: {config.CHECKPOINT_DIR}/")
-    print(f"  📁 Gráficas: {config.PLOTS_DIR}/")
-    print("\nPara usar el modelo entrenado:")
+    print("="*70)
+    print("\n📁 Archivos generados:")
+    print(f"  • Modelo final: {final_model_path}")
+    print(f"  • Checkpoints: {config.CHECKPOINT_DIR}/")
+    print(f"  • Gráficas: {config.PLOTS_DIR}/")
+    print("\n💡 Para usar el modelo entrenado:")
     print(f"  python main_temporal.py --lstm-model {final_model_path}")
-    print("="*60)
+    print("="*70)
 
 if __name__ == "__main__":
     main()
