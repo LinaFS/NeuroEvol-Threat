@@ -1,47 +1,118 @@
 """
-main.py - VERSIÓN CORREGIDA CON RECONOCIMIENTO DE PATRONES TEMPORALES
-Correcciones:
-- Error self._bbox_overlap arreglado
-- Umbral de confianza ajustado
-- Análisis temporal mejorado
-- Mejor visualización de armas
+main_temporal.py - Sistema Completo con LSTM y Clases Reales
+Integrado con classes_config.py para usar las 21 clases de comportamiento
 """
 
 from ultralytics import YOLO
 import cv2
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import time
 from collections import deque, defaultdict
+from pathlib import Path
+import argparse
+
+# Importar configuración de clases
+from classes_config import (
+    BEHAVIOR_CLASSES, 
+    WEAPON_CLASSES,
+    CLASS_RISK_LEVELS,
+    WEAPON_RISK_LEVELS,
+    get_risk_level,
+    get_class_name,
+    get_class_color,
+    get_temporal_category,
+    should_analyze_temporally
+)
 
 # ============================================
 # CONFIGURACIÓN
 # ============================================
-MODELO_GENERAL = 'yolov8n.pt'
-MODELO_SOSPECHOSO = 'ModeloSospechaOptimizado/best_model_ga_optimized/weights/best.pt'
-MODELO_ARMAS = 'ModeloArmasOptimizado/best_model_ga_optimized/weights/best.pt'
+class Config:
+    # Modelos
+    MODELO_GENERAL = 'yolov8n.pt'
+    MODELO_SOSPECHOSO = 'ModeloSospechaOptimizado/best_model_ga_optimized/weights/best.pt'
+    MODELO_ARMAS = 'ModeloArmasOptimizado/best_model_ga_optimized/weights/best.pt'
+    MODELO_LSTM = None  # Se configura desde argumentos
+    
+    # Tracking
+    MAX_DISAPPEARED = 30
+    DISTANCE_THRESHOLD = 50
+    
+    # Análisis temporal
+    WINDOW_SIZE = 30
+    MIN_TRAJECTORY_LENGTH = 5
+    
+    # Umbrales de confianza
+    CONFIDENCE_GENERAL = 0.3
+    CONFIDENCE_SOSPECHOSO = 0.4
+    CONFIDENCE_ARMAS = 0.25
+    
+    # Hardware
+    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-# Parámetros de tracking
-MAX_DISAPPEARED = 30
-DISTANCE_THRESHOLD = 50
+config = Config()
 
-# Parámetros de análisis temporal (AJUSTADOS)
-WINDOW_SIZE = 15  # Reducido de 30 a 15 frames para detección más rápida
-LOITERING_TIME = 5  # Reducido de 10 a 5 segundos
-VELOCITY_THRESHOLD = 3  # Más sensible
-
-# Umbrales de confianza (AJUSTADOS)
-CONFIDENCE_GENERAL = 0.3  # Reducido de 0.5 a 0.3
-CONFIDENCE_ARMAS = 0.25   # Más sensible para armas
 
 # ============================================
-# FUNCIONES AUXILIARES (FUERA DE CLASES)
+# MODELO LSTM
+# ============================================
+class BehaviorLSTM(nn.Module):
+    """Modelo LSTM para clasificación de comportamientos temporales"""
+    
+    def __init__(self, input_dim=20, hidden_dim=128, num_layers=2, num_classes=6, dropout=0.3):
+        super(BehaviorLSTM, self).__init__()
+        
+        self.lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0,
+            bidirectional=False
+        )
+        
+        self.fc1 = nn.Linear(hidden_dim, hidden_dim // 2)
+        self.dropout = nn.Dropout(dropout)
+        self.fc2 = nn.Linear(hidden_dim // 2, num_classes)
+        self.batch_norm = nn.BatchNorm1d(hidden_dim // 2)
+        
+    def forward(self, x):
+        lstm_out, (hidden, cell) = self.lstm(x)
+        last_output = lstm_out[:, -1, :]
+        
+        out = self.fc1(last_output)
+        out = self.batch_norm(out)
+        out = F.relu(out)
+        out = self.dropout(out)
+        out = self.fc2(out)
+        
+        return out, hidden
+
+
+# ============================================
+# MAPEO DE CLASES LSTM A CLASES REALES
+# ============================================
+LSTM_TO_BEHAVIOR = {
+    0: 'Normal_Videos',      # normal
+    1: 'Meet_and_Split',     # loitering
+    2: 'Assault',            # aggression
+    3: 'Shooting',           # weapon_carry
+    4: 'Stealing',           # erratic_movement
+    5: 'Explosion'           # critical
+}
+
+
+# ============================================
+# FUNCIONES AUXILIARES
 # ============================================
 def bbox_overlap(bbox1, bbox2):
     """Calcular IoU entre dos bboxes"""
     x1_min, y1_min, x1_max, y1_max = bbox1
     x2_min, y2_min, x2_max, y2_max = bbox2
     
-    # Intersección
     x_inter_min = max(x1_min, x2_min)
     y_inter_min = max(y1_min, y2_min)
     x_inter_max = min(x1_max, x2_max)
@@ -51,18 +122,15 @@ def bbox_overlap(bbox1, bbox2):
         return 0.0
     
     inter_area = (x_inter_max - x_inter_min) * (y_inter_max - y_inter_min)
-    
-    # Áreas
     area1 = (x1_max - x1_min) * (y1_max - y1_min)
     area2 = (x2_max - x2_min) * (y2_max - y2_min)
-    
-    # IoU
     union_area = area1 + area2 - inter_area
+    
     return inter_area / union_area if union_area > 0 else 0.0
 
 
 def bbox_distance(bbox1, bbox2):
-    """Calcular distancia entre centroides de dos bboxes"""
+    """Calcular distancia entre centroides"""
     cx1 = (bbox1[0] + bbox1[2]) / 2
     cy1 = (bbox1[1] + bbox1[3]) / 2
     cx2 = (bbox2[0] + bbox2[2]) / 2
@@ -71,26 +139,30 @@ def bbox_distance(bbox1, bbox2):
 
 
 # ============================================
-# CLASE: SIMPLE TRACKER
+# TRACKER
 # ============================================
 class SimpleTracker:
-    """Tracker simple basado en distancia euclidiana"""
+    """Tracker simple con historial de trayectorias"""
+    
     def __init__(self, max_disappeared=30):
         self.next_id = 0
         self.objects = {}
         self.disappeared = {}
         self.trajectories = defaultdict(lambda: deque(maxlen=90))
+        self.class_history = defaultdict(lambda: deque(maxlen=30))
         self.max_disappeared = max_disappeared
         
-    def register(self, centroid, bbox):
+    def register(self, centroid, bbox, class_id):
         """Registrar nuevo objeto"""
         self.objects[self.next_id] = centroid
         self.disappeared[self.next_id] = 0
         self.trajectories[self.next_id].append({
             'centroid': centroid,
             'bbox': bbox,
-            'timestamp': time.time()
+            'timestamp': time.time(),
+            'class': class_id
         })
+        self.class_history[self.next_id].append(class_id)
         self.next_id += 1
         return self.next_id - 1
     
@@ -99,9 +171,19 @@ class SimpleTracker:
         del self.objects[object_id]
         del self.disappeared[object_id]
     
+    def get_dominant_class(self, object_id):
+        """Obtener clase dominante en historial"""
+        if object_id not in self.class_history or len(self.class_history[object_id]) == 0:
+            return None
+        
+        # Retornar la clase más común en últimos frames
+        from collections import Counter
+        counts = Counter(self.class_history[object_id])
+        return counts.most_common(1)[0][0]
+    
     def update(self, detections):
         """
-        Actualizar tracker con nuevas detecciones
+        Actualizar tracker
         detections: List[(x1, y1, x2, y2, confidence, class)]
         Returns: Dict[id: (x1, y1, x2, y2, class)]
         """
@@ -127,7 +209,7 @@ class SimpleTracker:
         
         if len(self.objects) == 0:
             for i, centroid in enumerate(input_centroids):
-                self.register(centroid, input_bboxes[i])
+                self.register(centroid, input_bboxes[i], input_classes[i])
         else:
             object_ids = list(self.objects.keys())
             object_centroids = list(self.objects.values())
@@ -150,7 +232,7 @@ class SimpleTracker:
                 if row in used_rows or col in used_cols:
                     continue
                 
-                if distances[row, col] > DISTANCE_THRESHOLD:
+                if distances[row, col] > config.DISTANCE_THRESHOLD:
                     continue
                 
                 object_id = object_ids[row]
@@ -159,8 +241,10 @@ class SimpleTracker:
                 self.trajectories[object_id].append({
                     'centroid': input_centroids[col],
                     'bbox': input_bboxes[col],
-                    'timestamp': time.time()
+                    'timestamp': time.time(),
+                    'class': input_classes[col]
                 })
+                self.class_history[object_id].append(input_classes[col])
                 
                 used_rows.add(row)
                 used_cols.add(col)
@@ -174,150 +258,308 @@ class SimpleTracker:
             
             unused_cols = set(range(len(input_centroids))) - used_cols
             for col in unused_cols:
-                self.register(input_centroids[col], input_bboxes[col])
+                self.register(input_centroids[col], input_bboxes[col], input_classes[col])
         
+        # Retornar objetos activos con su clase dominante
         active_objects = {}
         for object_id in self.objects.keys():
             if len(self.trajectories[object_id]) > 0:
                 last_point = self.trajectories[object_id][-1]
-                active_objects[object_id] = last_point['bbox']
+                dominant_class = self.get_dominant_class(object_id)
+                active_objects[object_id] = (*last_point['bbox'], dominant_class)
         
         return active_objects
 
 
 # ============================================
-# CLASE: ANALIZADOR DE COMPORTAMIENTO
+# EXTRACTOR DE CARACTERÍSTICAS
 # ============================================
-class BehaviorAnalyzer:
-    """Analiza trayectorias para detectar comportamientos sospechosos"""
-    def __init__(self):
-        self.alert_cooldown = {}
-        self.cooldown_time = 5  # Reducido de 10 a 5 segundos
+class FeatureExtractor:
+    """Extrae características temporales de trayectorias"""
     
-    def analyze_trajectory(self, trajectory, track_id, weapon_detected=False):
-        """
-        Analizar trayectoria y determinar comportamiento
-        Returns: (behavior, alert_level, features)
-        """
-        if len(trajectory) < 3:  # Reducido de 5 a 3
-            return 'normal', 0, {}
-        
-        features = self._extract_features(trajectory)
-        
-        behavior = 'normal'
-        alert_level = 0
-        
-        # 1. PORTACIÓN DE ARMA (Prioridad máxima)
-        if weapon_detected:
-            behavior = 'weapon_carry'
-            alert_level = 3
-        
-        # 2. LOITERING (Merodeando)
-        elif features['dwelling_time'] > LOITERING_TIME and features['velocity_mean'] < 1.0:
-            behavior = 'loitering'
-            alert_level = 2
-        
-        # 3. MOVIMIENTO ERRÁTICO
-        elif features['direction_changes'] > 5 and features['velocity_std'] > 2.0:  # Más sensible
-            behavior = 'erratic_movement'
-            alert_level = 2
-        
-        # 4. VELOCIDAD ANORMAL
-        elif features['velocity_mean'] > 8.0:  # Reducido de 10 a 8
-            behavior = 'running'
-            alert_level = 1
-        
-        # Verificar cooldown
-        if alert_level > 0:
-            current_time = time.time()
-            if track_id in self.alert_cooldown:
-                if current_time - self.alert_cooldown[track_id] < self.cooldown_time:
-                    alert_level = 0
-            self.alert_cooldown[track_id] = current_time
-        
-        return behavior, alert_level, features
+    def __init__(self, window_size=30):
+        self.window_size = window_size
     
-    def _extract_features(self, trajectory):
-        """Extraer características de la trayectoria"""
-        features = {}
+    def extract(self, trajectory):
+        """
+        Extraer 20 características de una trayectoria
+        Returns: np.array de shape (window_size, 20)
+        """
+        if len(trajectory) < 3:
+            return None
         
-        # Velocidades
-        velocities = []
-        for i in range(1, len(trajectory)):
-            prev = trajectory[i-1]['centroid']
-            curr = trajectory[i]['centroid']
-            dt = trajectory[i]['timestamp'] - trajectory[i-1]['timestamp']
+        # Si la trayectoria es más corta que window_size, rellenar
+        if len(trajectory) < self.window_size:
+            # Repetir el primer punto
+            padding = [trajectory[0]] * (self.window_size - len(trajectory))
+            trajectory = padding + list(trajectory)
+        else:
+            # Tomar últimos window_size puntos
+            trajectory = list(trajectory)[-self.window_size:]
+        
+        features_sequence = []
+        
+        for i in range(len(trajectory)):
+            # Tomar ventana actual
+            window_end = i + 1
+            window = trajectory[max(0, window_end - 5):window_end]  # Ventana de 5 frames
             
+            if len(window) < 2:
+                # Si no hay suficientes datos, usar ceros
+                features = np.zeros(20, dtype=np.float32)
+            else:
+                features = self._compute_features(window)
+            
+            features_sequence.append(features)
+        
+        return np.array(features_sequence, dtype=np.float32)
+    
+    def _compute_features(self, window):
+        """Computar características de una ventana pequeña"""
+        # Extraer datos
+        centroids = np.array([p['centroid'] for p in window])
+        timestamps = np.array([p['timestamp'] for p in window])
+        
+        # 1-2: Posición promedio
+        x_mean = np.mean(centroids[:, 0]) / 640.0  # Normalizar por ancho típico
+        y_mean = np.mean(centroids[:, 1]) / 480.0  # Normalizar por alto típico
+        
+        # 3-4: Desviación estándar de posición
+        x_std = np.std(centroids[:, 0]) / 640.0
+        y_std = np.std(centroids[:, 1]) / 480.0
+        
+        # 5: Área cubierta
+        x_range = np.ptp(centroids[:, 0]) / 640.0
+        y_range = np.ptp(centroids[:, 1]) / 480.0
+        area_coverage = x_range * y_range
+        
+        # 6: Cercanía al borde
+        near_edge = 1.0 if (x_mean < 0.1 or x_mean > 0.9 or y_mean < 0.1 or y_mean > 0.9) else 0.0
+        
+        # 7-9: Velocidades
+        velocities = []
+        for i in range(1, len(centroids)):
+            dt = timestamps[i] - timestamps[i-1]
             if dt > 0:
-                dx = curr[0] - prev[0]
-                dy = curr[1] - prev[1]
+                dx = centroids[i][0] - centroids[i-1][0]
+                dy = centroids[i][1] - centroids[i-1][1]
                 velocity = np.sqrt(dx**2 + dy**2) / dt
                 velocities.append(velocity)
         
-        features['velocity_mean'] = np.mean(velocities) if velocities else 0
-        features['velocity_std'] = np.std(velocities) if velocities else 0
-        features['velocity_max'] = np.max(velocities) if velocities else 0
+        velocity_mean = np.mean(velocities) if velocities else 0.0
+        velocity_max = np.max(velocities) if velocities else 0.0
+        velocity_std = np.std(velocities) if velocities else 0.0
         
-        # Tiempo de permanencia
-        total_time = trajectory[-1]['timestamp'] - trajectory[0]['timestamp']
-        features['dwelling_time'] = total_time
+        # 10-11: Aceleraciones
+        accelerations = []
+        for i in range(1, len(velocities)):
+            dt = timestamps[i+1] - timestamps[i]
+            if dt > 0:
+                acc = (velocities[i] - velocities[i-1]) / dt
+                accelerations.append(abs(acc))
         
-        # Cambios de dirección
+        acceleration_mean = np.mean(accelerations) if accelerations else 0.0
+        acceleration_max = np.max(accelerations) if accelerations else 0.0
+        
+        # 12: Cambios de dirección
         direction_changes = 0
-        for i in range(2, len(trajectory)):
-            v1 = np.array(trajectory[i-1]['centroid']) - np.array(trajectory[i-2]['centroid'])
-            v2 = np.array(trajectory[i]['centroid']) - np.array(trajectory[i-1]['centroid'])
-            
+        for i in range(2, len(centroids)):
+            v1 = centroids[i-1] - centroids[i-2]
+            v2 = centroids[i] - centroids[i-1]
             norm1 = np.linalg.norm(v1)
             norm2 = np.linalg.norm(v2)
-            
             if norm1 > 0 and norm2 > 0:
                 cos_angle = np.dot(v1, v2) / (norm1 * norm2)
                 angle = np.degrees(np.arccos(np.clip(cos_angle, -1, 1)))
                 if angle > 45:
                     direction_changes += 1
         
-        features['direction_changes'] = direction_changes
+        # 13: Tiempo de permanencia
+        dwelling_time = timestamps[-1] - timestamps[0]
         
-        # Distancia total
-        total_distance = 0
-        for i in range(1, len(trajectory)):
-            prev = trajectory[i-1]['centroid']
-            curr = trajectory[i]['centroid']
-            total_distance += np.linalg.norm(np.array(curr) - np.array(prev))
+        # 14: Distancia total recorrida
+        distance_traveled = 0
+        for i in range(1, len(centroids)):
+            distance_traveled += np.linalg.norm(centroids[i] - centroids[i-1])
         
-        features['distance_traveled'] = total_distance
+        # 15: Duración de trayectoria
+        trajectory_duration = dwelling_time
         
-        return features
+        # 16: Número de frames
+        frames_count = len(window)
+        
+        # 17-20: Características adicionales (simplificadas)
+        nearby_objects = 0.0  # Placeholder
+        min_distance = 100.0  # Placeholder
+        interaction_duration = 0.0  # Placeholder
+        zone_visited = 0.0  # Placeholder
+        
+        return np.array([
+            x_mean, y_mean, x_std, y_std, area_coverage, near_edge,
+            velocity_mean, velocity_max, velocity_std,
+            acceleration_mean, acceleration_max,
+            direction_changes, dwelling_time, distance_traveled,
+            trajectory_duration, frames_count,
+            nearby_objects, min_distance, interaction_duration, zone_visited
+        ], dtype=np.float32)
+
+
+# ============================================
+# ANALIZADOR DE COMPORTAMIENTO
+# ============================================
+class BehaviorAnalyzer:
+    """Analiza comportamientos usando YOLO + LSTM + Reglas"""
+    
+    def __init__(self, lstm_model=None):
+        self.lstm_model = lstm_model
+        self.feature_extractor = FeatureExtractor(window_size=config.WINDOW_SIZE)
+        self.alert_cooldown = {}
+        self.cooldown_time = 5
+        
+        if self.lstm_model:
+            self.lstm_model.eval()
+            print("   ✅ Modelo LSTM cargado")
+    
+    def analyze(self, track_id, trajectory, yolo_class_id, weapon_detected=False):
+        """
+        Analizar comportamiento combinando YOLO + LSTM + Reglas
+        
+        Returns:
+            behavior_name: str - Nombre del comportamiento
+            alert_level: int - Nivel de alerta (0-3)
+            confidence: float - Confianza de la predicción
+            source: str - Fuente de la predicción (yolo/lstm/rule)
+        """
+        if len(trajectory) < config.MIN_TRAJECTORY_LENGTH:
+            return 'normal', 0, 0.0, 'insufficient_data'
+        
+        # 1. Obtener clase de YOLO
+        yolo_behavior = get_class_name(yolo_class_id, is_weapon=False)
+        yolo_risk = get_risk_level(yolo_class_id, is_weapon=False)
+        
+        # 2. PRIORIDAD: Portación de arma
+        if weapon_detected:
+            return 'Shooting', 3, 1.0, 'weapon_detected'
+        
+        # 3. Si es clase crítica de YOLO, usar directamente
+        if yolo_risk == 3:
+            return yolo_behavior, yolo_risk, 0.9, 'yolo_critical'
+        
+        # 4. Si tenemos LSTM, usarlo para análisis temporal
+        lstm_behavior = None
+        lstm_confidence = 0.0
+        
+        if self.lstm_model and len(trajectory) >= 10:
+            features = self.feature_extractor.extract(trajectory)
+            if features is not None:
+                try:
+                    with torch.no_grad():
+                        features_tensor = torch.FloatTensor(features).unsqueeze(0).to(config.DEVICE)
+                        outputs, _ = self.lstm_model(features_tensor)
+                        probs = F.softmax(outputs, dim=1)
+                        lstm_pred = torch.argmax(probs, dim=1).item()
+                        lstm_confidence = probs[0, lstm_pred].item()
+                        
+                        # Mapear predicción LSTM a clase de comportamiento
+                        lstm_behavior = LSTM_TO_BEHAVIOR.get(lstm_pred, 'Normal_Videos')
+                except Exception as e:
+                    print(f"   ⚠️  Error en LSTM: {e}")
+        
+        # 5. Decidir comportamiento final
+        if lstm_behavior and lstm_confidence > 0.7:
+            # Usar predicción LSTM si hay alta confianza
+            final_behavior = lstm_behavior
+            final_risk = get_risk_level(
+                list(BEHAVIOR_CLASSES.keys())[list(BEHAVIOR_CLASSES.values()).index(lstm_behavior)],
+                is_weapon=False
+            )
+            return final_behavior, final_risk, lstm_confidence, 'lstm'
+        else:
+            # Usar predicción de YOLO
+            return yolo_behavior, yolo_risk, 0.8, 'yolo'
+    
+    def check_cooldown(self, track_id):
+        """Verificar si el track está en cooldown"""
+        if track_id in self.alert_cooldown:
+            if time.time() - self.alert_cooldown[track_id] < self.cooldown_time:
+                return True
+        return False
+    
+    def set_cooldown(self, track_id):
+        """Establecer cooldown para un track"""
+        self.alert_cooldown[track_id] = time.time()
 
 
 # ============================================
 # FUNCIÓN PRINCIPAL
 # ============================================
-def main():
-    # Cargar modelos
-    print("🔧 Cargando modelos...")
-    modelo_general = YOLO(MODELO_GENERAL)
-    modelo_armas = YOLO(MODELO_ARMAS)
-    print("✅ Modelos cargados")
+def main(args):
+    """Función principal del sistema"""
     
-    # Inicializar
+    print("\n" + "="*70)
+    print("🚀 NEUROEVOL-THREAT - Sistema de Análisis Temporal")
+    print("="*70)
+    
+    # Configurar modelo LSTM si se proporciona
+    lstm_model = None
+    if args.lstm_model and Path(args.lstm_model).exists():
+        print(f"\n📦 Cargando modelo LSTM: {args.lstm_model}")
+        try:
+            checkpoint = torch.load(args.lstm_model, map_location=config.DEVICE)
+            model_config = checkpoint.get('config', {})
+            
+            lstm_model = BehaviorLSTM(
+                input_dim=model_config.get('input_dim', 20),
+                hidden_dim=model_config.get('hidden_dim', 128),
+                num_layers=model_config.get('num_layers', 2),
+                num_classes=model_config.get('num_classes', 6),
+                dropout=model_config.get('dropout', 0.3)
+            )
+            lstm_model.load_state_dict(checkpoint['model_state_dict'])
+            lstm_model.to(config.DEVICE)
+            lstm_model.eval()
+            print("   ✅ Modelo LSTM cargado correctamente")
+        except Exception as e:
+            print(f"   ⚠️  Error cargando LSTM: {e}")
+            print("   ℹ️  Continuando sin análisis LSTM")
+            lstm_model = None
+    
+    # Cargar modelos YOLO
+    print("\n🔧 Cargando modelos YOLO...")
+    modelo_general = YOLO(config.MODELO_GENERAL)
+    modelo_sospechoso = YOLO(config.MODELO_SOSPECHOSO) if Path(config.MODELO_SOSPECHOSO).exists() else None
+    modelo_armas = YOLO(config.MODELO_ARMAS) if Path(config.MODELO_ARMAS).exists() else None
+    
+    print(f"   ✅ Modelo general: {config.MODELO_GENERAL}")
+    if modelo_sospechoso:
+        print(f"   ✅ Modelo sospechoso: {config.MODELO_SOSPECHOSO}")
+    if modelo_armas:
+        print(f"   ✅ Modelo armas: {config.MODELO_ARMAS}")
+    
+    # Inicializar componentes
     tracker_general = SimpleTracker()
+    tracker_sospechoso = SimpleTracker()
     tracker_armas = SimpleTracker()
-    behavior_analyzer = BehaviorAnalyzer()
+    behavior_analyzer = BehaviorAnalyzer(lstm_model=lstm_model)
     
     # Captura de video
-    cap = cv2.VideoCapture(0)
+    if args.source.isdigit():
+        source = int(args.source)
+    else:
+        source = args.source
+    
+    cap = cv2.VideoCapture(source)
     
     if not cap.isOpened():
-        print("❌ Error: No se pudo abrir la cámara")
+        print("❌ Error: No se pudo abrir la fuente de video")
         return
     
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
     frame_count = 0
     
-    print("\n🚀 Sistema iniciado. Presiona 'ESC' para salir.")
-    print("━" * 60)
+    print("\n" + "="*70)
+    print("🎥 Sistema activo. Presiona 'ESC' para salir")
+    print("="*70)
     
     alert_history = []
     
@@ -328,32 +570,40 @@ def main():
                 break
             
             frame_display = frame.copy()
+            h, w = frame.shape[:2]
             
             # ═══════════════════════════════════════════════════
             # DETECCIÓN
             # ═══════════════════════════════════════════════════
-            resultados_generales = modelo_general(frame, verbose=False)[0]
-            resultados_armas = modelo_armas(frame, verbose=False)[0]
             
-            # Convertir con umbral ajustado
+            # Detección general
+            resultados_generales = modelo_general(frame, verbose=False)[0]
             detecciones_generales = []
             for r in resultados_generales.boxes.data.cpu().numpy():
-                if r[4] > CONFIDENCE_GENERAL:
+                if r[4] > config.CONFIDENCE_GENERAL and int(r[5]) == 0:  # Solo personas
                     detecciones_generales.append(r)
             
-            detecciones_armas = []
-            for r in resultados_armas.boxes.data.cpu().numpy():
-                if r[4] > CONFIDENCE_ARMAS:
-                    detecciones_armas.append(r)
+            # Detección de comportamientos sospechosos
+            detecciones_sospechosas = []
+            if modelo_sospechoso:
+                resultados_sospechosos = modelo_sospechoso(frame, verbose=False)[0]
+                for r in resultados_sospechosos.boxes.data.cpu().numpy():
+                    if r[4] > config.CONFIDENCE_SOSPECHOSO:
+                        detecciones_sospechosas.append(r)
             
-            # DEBUG: Mostrar detecciones de armas
-            if len(detecciones_armas) > 0:
-                print(f"⚠️  Frame {frame_count}: {len(detecciones_armas)} arma(s) detectada(s)")
+            # Detección de armas
+            detecciones_armas = []
+            if modelo_armas:
+                resultados_armas = modelo_armas(frame, verbose=False)[0]
+                for r in resultados_armas.boxes.data.cpu().numpy():
+                    if r[4] > config.CONFIDENCE_ARMAS:
+                        detecciones_armas.append(r)
             
             # ═══════════════════════════════════════════════════
             # TRACKING
             # ═══════════════════════════════════════════════════
             tracks_general = tracker_general.update(detecciones_generales)
+            tracks_sospechoso = tracker_sospechoso.update(detecciones_sospechosas)
             tracks_armas = tracker_armas.update(detecciones_armas)
             
             # ═══════════════════════════════════════════════════
@@ -361,107 +611,169 @@ def main():
             # ═══════════════════════════════════════════════════
             alertas_activas = []
             
-            for track_id, bbox in tracks_general.items():
-                trajectory = list(tracker_general.trajectories[track_id])
+            # Analizar tracks sospechosos
+            for track_id, track_data in tracks_sospechoso.items():
+                *bbox, class_id = track_data
+                trajectory = list(tracker_sospechoso.trajectories[track_id])
                 
-                # Analizar con menos frames requeridos
-                if len(trajectory) >= 5:  # Reducido de WINDOW_SIZE
-                    # Verificar arma cercana usando función global
+                if len(trajectory) >= config.MIN_TRAJECTORY_LENGTH:
+                    # Verificar arma cercana
                     weapon_nearby = False
-                    for arma_id, arma_bbox in tracks_armas.items():
-                        overlap = bbox_overlap(bbox, arma_bbox)
-                        distance = bbox_distance(bbox, arma_bbox)
-                        
-                        # Considerar arma si hay overlap O está cerca
-                        if overlap > 0.1 or distance < 100:  # Más permisivo
+                    for arma_id, arma_data in tracks_armas.items():
+                        arma_bbox = arma_data[:4]
+                        if bbox_overlap(bbox, arma_bbox) > 0.1 or bbox_distance(bbox, arma_bbox) < 100:
                             weapon_nearby = True
-                            print(f"🔴 ARMA DETECTADA cerca de ID:{track_id} (overlap={overlap:.2f}, dist={distance:.1f})")
                             break
                     
                     # Analizar comportamiento
-                    behavior, alert_level, features = behavior_analyzer.analyze_trajectory(
-                        trajectory, track_id, weapon_nearby
-                    )
-                    
-                    if alert_level > 0:
-                        alertas_activas.append({
-                            'track_id': track_id,
-                            'behavior': behavior,
-                            'alert_level': alert_level,
-                            'bbox': bbox,
-                            'features': features
-                        })
+                    if not behavior_analyzer.check_cooldown(track_id):
+                        behavior_name, alert_level, confidence, source = behavior_analyzer.analyze(
+                            track_id, trajectory, class_id, weapon_nearby
+                        )
+                        
+                        if alert_level > 0:
+                            behavior_analyzer.set_cooldown(track_id)
+                            alertas_activas.append({
+                                'track_id': track_id,
+                                'behavior': behavior_name,
+                                'alert_level': alert_level,
+                                'confidence': confidence,
+                                'source': source,
+                                'bbox': bbox,
+                                'weapon_nearby': weapon_nearby
+                            })
             
             # ═══════════════════════════════════════════════════
             # VISUALIZACIÓN
             # ═══════════════════════════════════════════════════
             
-            # Dibujar detecciones generales
-            for track_id, bbox in tracks_general.items():
-                x1, y1, x2, y2 = bbox
+            # Dibujar detecciones generales (personas)
+            for track_id, track_data in tracks_general.items():
+                x1, y1, x2, y2, _ = track_data
                 color = (0, 255, 0)
+                cv2.rectangle(frame_display, (int(x1), int(y1)), (int(x2), int(y2)), color, 1)
+            
+            # Dibujar comportamientos sospechosos
+            for track_id, track_data in tracks_sospechoso.items():
+                x1, y1, x2, y2, class_id = track_data
+                class_name = get_class_name(class_id, is_weapon=False)
+                risk_level = get_risk_level(class_id, is_weapon=False)
+                color = get_class_color(class_name, is_weapon=False)
+                
                 cv2.rectangle(frame_display, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-                cv2.putText(frame_display, f'ID:{track_id}', (int(x1), int(y1)-10),
+                label = f'{class_name} ID:{track_id}'
+                cv2.putText(frame_display, label, (int(x1), int(y1)-10),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
             
             # Dibujar alertas
             for alerta in alertas_activas:
                 x1, y1, x2, y2 = alerta['bbox']
+                behavior = alerta['behavior']
+                alert_level = alerta['alert_level']
+                confidence = alerta['confidence']
+                source = alerta['source']
                 
-                if alerta['alert_level'] == 3:
-                    color = (0, 0, 255)
-                    label = f"🔴 {alerta['behavior'].upper()}"
-                elif alerta['alert_level'] == 2:
-                    color = (0, 165, 255)
-                    label = f"🟠 {alerta['behavior'].upper()}"
+                # Color según nivel de riesgo
+                if alert_level == 3:
+                    color = (0, 0, 255)  # Rojo
+                    prefix = "🔴 CRÍTICO"
+                elif alert_level == 2:
+                    color = (0, 165, 255)  # Naranja
+                    prefix = "🟠 ALERTA"
                 else:
-                    color = (0, 255, 255)
-                    label = f"🟡 {alerta['behavior'].upper()}"
+                    color = (0, 255, 255)  # Amarillo
+                    prefix = "🟡 PRECAUCIÓN"
                 
+                # Dibujar bbox más grueso
                 cv2.rectangle(frame_display, (int(x1), int(y1)), (int(x2), int(y2)), color, 4)
-                cv2.putText(frame_display, label, (int(x1), int(y1)-30),
+                
+                # Etiqueta principal
+                label = f"{prefix} - {behavior}"
+                cv2.putText(frame_display, label, (int(x1), int(y1)-40),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
                 
-                vel = alerta['features'].get('velocity_mean', 0)
-                dwell = alerta['features'].get('dwelling_time', 0)
-                info = f"Vel:{vel:.1f} Tiempo:{dwell:.1f}s"
-                cv2.putText(frame_display, info, (int(x1), int(y2)+20),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+                # Info adicional
+                info = f"ID:{alerta['track_id']} | Conf:{confidence:.2f} | {source}"
+                cv2.putText(frame_display, info, (int(x1), int(y1)-15),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
                 
+                # Indicador de arma si aplica
+                if alerta['weapon_nearby']:
+                    cv2.putText(frame_display, "⚠️ ARMA DETECTADA", (int(x1), int(y2)+25),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                
+                # Agregar a historial
                 alert_history.append({
                     'frame': frame_count,
                     'time': time.time(),
                     'track_id': alerta['track_id'],
-                    'behavior': alerta['behavior'],
-                    'level': alerta['alert_level']
+                    'behavior': behavior,
+                    'level': alert_level,
+                    'confidence': confidence,
+                    'source': source
                 })
             
-            # Dibujar armas (MEJORADO)
-            for track_id, bbox in tracks_armas.items():
-                x1, y1, x2, y2 = bbox
+            # Dibujar armas
+            for track_id, track_data in tracks_armas.items():
+                x1, y1, x2, y2, class_id = track_data
+                weapon_name = get_class_name(class_id, is_weapon=True)
                 color = (0, 0, 255)
-                cv2.rectangle(frame_display, (int(x1), int(y1)), (int(x2), int(y2)), color, 5)
-                cv2.putText(frame_display, 'ARMA DETECTADA', (int(x1), int(y1)-10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 3)
                 
-                # Círculo pulsante para llamar atención
+                cv2.rectangle(frame_display, (int(x1), int(y1)), (int(x2), int(y2)), color, 5)
+                cv2.putText(frame_display, f'⚠️ {weapon_name}', (int(x1), int(y1)-10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                
+                # Círculo pulsante
                 center = (int((x1+x2)/2), int((y1+y2)/2))
                 radius = int(max(x2-x1, y2-y1) / 2) + 10
-                cv2.circle(frame_display, center, radius, color, 3)
+                pulse = int(5 * np.sin(frame_count * 0.2)) + 10
+                cv2.circle(frame_display, center, radius + pulse, color, 3)
             
-            # Info general
-            info_text = f"Tracks: {len(tracks_general)} | Armas: {len(tracks_armas)} | Alertas: {len(alertas_activas)} | Frame: {frame_count}"
-            cv2.putText(frame_display, info_text, (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            # Panel de información superior
+            panel_height = 80
+            overlay = frame_display.copy()
+            cv2.rectangle(overlay, (0, 0), (w, panel_height), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.6, frame_display, 0.4, 0, frame_display)
             
-            cv2.imshow('NeuroEvol-Threat - Reconocimiento de Patrones', frame_display)
+            # Stats
+            stats_text = [
+                f"Frame: {frame_count}",
+                f"Personas: {len(tracks_general)}",
+                f"Sospechosos: {len(tracks_sospechoso)}",
+                f"Armas: {len(tracks_armas)}",
+                f"Alertas: {len(alertas_activas)}"
+            ]
             
+            x_offset = 10
+            for i, text in enumerate(stats_text):
+                cv2.putText(frame_display, text, (x_offset, 25),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                x_offset += 150
+            
+            # Línea de separación
+            cv2.line(frame_display, (0, panel_height), (w, panel_height), (255, 255, 255), 2)
+            
+            # Sistema de análisis
+            system_info = f"Sistema: YOLO + {'LSTM' if lstm_model else 'Reglas'} | Device: {config.DEVICE}"
+            cv2.putText(frame_display, system_info, (10, 55),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+            
+            # Mostrar frame
+            cv2.imshow('NeuroEvol-Threat - Análisis Temporal Completo', frame_display)
+            
+            # Control de teclado
             key = cv2.waitKey(1) & 0xFF
             if key == 27:  # ESC
                 break
+            elif key == ord('s'):  # Guardar screenshot
+                screenshot_path = f'screenshot_{frame_count}.png'
+                cv2.imwrite(screenshot_path, frame_display)
+                print(f"📸 Screenshot guardado: {screenshot_path}")
             
             frame_count += 1
     
+    except KeyboardInterrupt:
+        print("\n⚠️  Interrupción del usuario")
     except Exception as e:
         print(f"\n❌ ERROR: {e}")
         import traceback
@@ -472,24 +784,97 @@ def main():
         cv2.destroyAllWindows()
         
         # Reporte final
-        print("\n" + "━" * 60)
-        print("📊 REPORTE FINAL")
-        print("━" * 60)
+        print("\n" + "="*70)
+        print("📊 REPORTE FINAL DE SESIÓN")
+        print("="*70)
         print(f"Frames procesados: {frame_count}")
+        print(f"Duración: {frame_count/fps:.1f} segundos")
         print(f"Total de alertas: {len(alert_history)}")
         
         if alert_history:
-            print("\nAlertas por tipo:")
+            print("\n📈 Distribución de alertas:")
             from collections import Counter
+            
+            # Por comportamiento
             behavior_counts = Counter([a['behavior'] for a in alert_history])
+            print("\n  Por comportamiento:")
             for behavior, count in behavior_counts.most_common():
-                print(f"  {behavior:20s}: {count}")
+                print(f"    • {behavior:25s}: {count:3d} alertas")
+            
+            # Por nivel
+            level_counts = Counter([a['level'] for a in alert_history])
+            print("\n  Por nivel de riesgo:")
+            level_names = {0: 'Sin riesgo', 1: 'Bajo', 2: 'Medio', 3: 'Alto'}
+            for level in [3, 2, 1, 0]:
+                if level in level_counts:
+                    emoji = ['⚪', '🟡', '🟠', '🔴'][level]
+                    print(f"    {emoji} {level_names[level]:12s}: {level_counts[level]:3d} alertas")
+            
+            # Por fuente
+            source_counts = Counter([a['source'] for a in alert_history])
+            print("\n  Por fuente de detección:")
+            for source, count in source_counts.most_common():
+                print(f"    • {source:20s}: {count:3d} alertas")
+            
+            # Confianza promedio
+            avg_confidence = np.mean([a['confidence'] for a in alert_history])
+            print(f"\n  Confianza promedio: {avg_confidence:.2%}")
         
-        print("━" * 60)
-        print("✅ Sistema finalizado")
+        print("\n" + "="*70)
+        print("✅ Sistema finalizado correctamente")
+        print("="*70)
 
 
+# ============================================
+# PUNTO DE ENTRADA
+# ============================================
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='NeuroEvol-Threat - Sistema de Análisis Temporal')
+    
+    parser.add_argument(
+        '--source',
+        type=str,
+        default='0',
+        help='Fuente de video (0 para webcam, o ruta a archivo)'
+    )
+    
+    parser.add_argument(
+        '--lstm-model',
+        type=str,
+        default=None,
+        help='Ruta al modelo LSTM entrenado (.pth)'
+    )
+    
+    parser.add_argument(
+        '--confidence-general',
+        type=float,
+        default=0.3,
+        help='Umbral de confianza para detección general'
+    )
+    
+    parser.add_argument(
+        '--confidence-behavior',
+        type=float,
+        default=0.4,
+        help='Umbral de confianza para comportamientos'
+    )
+    
+    parser.add_argument(
+        '--confidence-weapon',
+        type=float,
+        default=0.25,
+        help='Umbral de confianza para armas'
+    )
+    
+    args = parser.parse_args()
+    
+    # Actualizar configuración con argumentos
+    config.CONFIDENCE_GENERAL = args.confidence_general
+    config.CONFIDENCE_SOSPECHOSO = args.confidence_behavior
+    config.CONFIDENCE_ARMAS = args.confidence_weapon
+    config.MODELO_LSTM = args.lstm_model
+    
     import multiprocessing
     multiprocessing.freeze_support()
-    main()
+    
+    main(args)
