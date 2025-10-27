@@ -35,7 +35,7 @@ class Config:
     MODELO_GENERAL = 'yolov8n.pt'
     MODELO_SOSPECHOSO = 'ModeloSospechaOptimizado/best_model_ga_optimized/weights/best.pt'
     MODELO_ARMAS = 'ModeloArmasOptimizado/best_model_ga_optimized/weights/best.pt'
-    MODELO_LSTM = None  # Se configura desde argumentos
+    MODELO_LSTM = 'models/behavior_lstm_final.pth'
     
     # Tracking
     MAX_DISAPPEARED = 30
