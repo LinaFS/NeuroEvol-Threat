@@ -4,6 +4,7 @@ YOLOv8 con Algoritmos Genéticos - SISTEMA COMPLETO
 ✅ Visualización en tiempo real
 ✅ Checkpoints para pausar/reanudar
 ✅ Comparación con baseline
+✅ Detección automática de progreso
 """
 
 from ultralytics import YOLO
@@ -21,9 +22,9 @@ import time
 # ============================================
 # CONFIGURACIÓN BASE
 # ============================================
-DATASET_PATH = "datasetArmas/dataset.yaml"
+DATASET_PATH = "datasetSospecha/dataset.yaml"
 BASE_MODEL = "yolov8n.pt"
-DEVICE = 0  # GPU RTX 2050
+DEVICE = 0
 
 HARDWARE_CONFIG = {
     'workers': 2,
@@ -76,38 +77,29 @@ for directory in [LOG_DIR, CHECKPOINT_DIR, PLOTS_DIR]:
 # SISTEMA DE CHECKPOINTS
 # ============================================
 class CheckpointManager:
-    """Maneja guardado y carga de checkpoints del GA"""
-    
     def __init__(self, checkpoint_dir=CHECKPOINT_DIR):
         self.checkpoint_dir = checkpoint_dir
         self.checkpoint_file = os.path.join(checkpoint_dir, 'ga_checkpoint.pkl')
     
-    def save(self, generation, population, hof, logbook, stats):
-        """Guarda el estado actual del GA"""
+    def save(self, generation, population, hof, logbook):
         checkpoint_data = {
             'generation': generation,
             'population': population,
             'hof': hof,
             'logbook': logbook,
-            'stats': stats,
             'timestamp': datetime.now().isoformat(),
             'config': GA_CONFIG
         }
-        
         with open(self.checkpoint_file, 'wb') as f:
             pickle.dump(checkpoint_data, f)
-        
         print(f"💾 Checkpoint guardado: generación {generation}")
     
     def load(self):
-        """Carga un checkpoint previo"""
         if not os.path.exists(self.checkpoint_file):
             return None
-        
         try:
             with open(self.checkpoint_file, 'rb') as f:
                 data = pickle.load(f)
-            
             print(f"\n✅ Checkpoint cargado: generación {data['generation']}")
             print(f"   Timestamp: {data['timestamp']}")
             return data
@@ -116,7 +108,6 @@ class CheckpointManager:
             return None
     
     def exists(self):
-        """Verifica si existe un checkpoint"""
         return os.path.exists(self.checkpoint_file)
 
 
@@ -124,25 +115,20 @@ class CheckpointManager:
 # SISTEMA DE VISUALIZACIÓN
 # ============================================
 class GAVisualizer:
-    """Genera gráficas de la evolución del GA"""
-    
     def __init__(self, plots_dir=PLOTS_DIR):
         self.plots_dir = plots_dir
         plt.style.use('seaborn-v0_8-darkgrid')
     
     def plot_evolution(self, logbook, filename='evolution.png'):
-        """Gráfica de evolución del fitness"""
         gen = logbook.select("gen")
         avg_fitness = logbook.select("avg")
         max_fitness = logbook.select("max")
         min_fitness = logbook.select("min")
         
         fig, ax = plt.subplots(figsize=(12, 6))
-        
         ax.plot(gen, max_fitness, 'g-', label='Mejor Fitness', linewidth=2)
         ax.plot(gen, avg_fitness, 'b--', label='Fitness Promedio', linewidth=2)
         ax.plot(gen, min_fitness, 'r:', label='Peor Fitness', linewidth=2)
-        
         ax.fill_between(gen, min_fitness, max_fitness, alpha=0.2, color='blue')
         
         ax.set_xlabel('Generación', fontsize=12)
@@ -155,11 +141,9 @@ class GAVisualizer:
         save_path = os.path.join(self.plots_dir, filename)
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
-        
         print(f"📊 Gráfica guardada: {save_path}")
     
     def plot_hyperparams_distribution(self, hof, filename='hyperparams_dist.png'):
-        """Distribución de hiperparámetros en los mejores individuos"""
         if len(hof) == 0:
             return
         
@@ -171,9 +155,7 @@ class GAVisualizer:
         }
         
         fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-        fig.suptitle('Distribución de Hiperparámetros (Top 3)', 
-                     fontsize=14, fontweight='bold')
-        
+        fig.suptitle('Distribución de Hiperparámetros (Top 3)', fontsize=14, fontweight='bold')
         colors = ['#2ecc71', '#3498db', '#e74c3c']
         
         for idx, (param_name, values) in enumerate(params.items()):
@@ -190,13 +172,10 @@ class GAVisualizer:
         save_path = os.path.join(self.plots_dir, filename)
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
-        
         print(f"📊 Gráfica guardada: {save_path}")
     
     def plot_comparison(self, baseline_results, ga_results, filename='comparison.png'):
-        """Compara resultados baseline vs GA optimizado"""
         metrics = ['F1-Score', 'Precision', 'Recall', 'FP Rate', 'Latency (ms)']
-        
         baseline_vals = [
             baseline_results.get('f1', 0),
             baseline_results.get('precision', 0),
@@ -204,7 +183,6 @@ class GAVisualizer:
             baseline_results.get('fp_rate', 0),
             baseline_results.get('latency', 0) * 1000
         ]
-        
         ga_vals = [
             ga_results.get('f1', 0),
             ga_results.get('precision', 0),
@@ -215,36 +193,29 @@ class GAVisualizer:
         
         x = np.arange(len(metrics))
         width = 0.35
-        
         fig, ax = plt.subplots(figsize=(14, 7))
         
-        bars1 = ax.bar(x - width/2, baseline_vals, width, label='Baseline', 
-                       color='#95a5a6', alpha=0.8)
-        bars2 = ax.bar(x + width/2, ga_vals, width, label='GA Optimizado', 
-                       color='#2ecc71', alpha=0.8)
+        bars1 = ax.bar(x - width/2, baseline_vals, width, label='Baseline', color='#95a5a6', alpha=0.8)
+        bars2 = ax.bar(x + width/2, ga_vals, width, label='GA Optimizado', color='#2ecc71', alpha=0.8)
         
         ax.set_xlabel('Métricas', fontsize=12, fontweight='bold')
         ax.set_ylabel('Valor', fontsize=12, fontweight='bold')
-        ax.set_title('Comparación: Baseline vs GA Optimizado', 
-                     fontsize=14, fontweight='bold')
+        ax.set_title('Comparación: Baseline vs GA Optimizado', fontsize=14, fontweight='bold')
         ax.set_xticks(x)
         ax.set_xticklabels(metrics, rotation=15, ha='right')
         ax.legend(fontsize=11)
         ax.grid(True, alpha=0.3, axis='y')
         
-        # Agregar valores sobre las barras
         for bars in [bars1, bars2]:
             for bar in bars:
                 height = bar.get_height()
-                ax.text(bar.get_x() + bar.get_width()/2., height,
-                       f'{height:.3f}',
+                ax.text(bar.get_x() + bar.get_width()/2., height, f'{height:.3f}',
                        ha='center', va='bottom', fontsize=9)
         
         plt.tight_layout()
         save_path = os.path.join(self.plots_dir, filename)
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
-        
         print(f"📊 Gráfica de comparación guardada: {save_path}")
 
 
@@ -255,9 +226,7 @@ current_generation = 0
 individual_counter = 0
 
 def log_individual(generation, individual_id, individual, fitness, metrics):
-    """Guarda registro de cada individuo"""
     log_file = os.path.join(LOG_DIR, f"generation_{generation}.jsonl")
-    
     log_entry = {
         'timestamp': datetime.now().isoformat(),
         'generation': generation,
@@ -271,7 +240,6 @@ def log_individual(generation, individual_id, individual, fitness, metrics):
         'fitness': fitness,
         'metrics': metrics
     }
-    
     with open(log_file, 'a', encoding='utf-8') as f:
         f.write(json.dumps(log_entry) + '\n')
 
@@ -283,21 +251,12 @@ creator.create("FitnessMax", base.Fitness, weights=(1.0,))
 creator.create("Individual", list, fitness=creator.FitnessMax)
 
 toolbox = base.Toolbox()
-
-toolbox.register("attr_lr0", random.uniform, 
-                 HYPERPARAMS_RANGES['lr0'][0], 
-                 HYPERPARAMS_RANGES['lr0'][1])
+toolbox.register("attr_lr0", random.uniform, HYPERPARAMS_RANGES['lr0'][0], HYPERPARAMS_RANGES['lr0'][1])
 toolbox.register("attr_batch", random.choice, [4, 8, 12, 16])
-toolbox.register("attr_conf", random.uniform, 
-                 HYPERPARAMS_RANGES['conf'][0], 
-                 HYPERPARAMS_RANGES['conf'][1])
-toolbox.register("attr_iou", random.uniform, 
-                 HYPERPARAMS_RANGES['iou'][0], 
-                 HYPERPARAMS_RANGES['iou'][1])
-
+toolbox.register("attr_conf", random.uniform, HYPERPARAMS_RANGES['conf'][0], HYPERPARAMS_RANGES['conf'][1])
+toolbox.register("attr_iou", random.uniform, HYPERPARAMS_RANGES['iou'][0], HYPERPARAMS_RANGES['iou'][1])
 toolbox.register("individual", tools.initCycle, creator.Individual,
-                 (toolbox.attr_lr0, toolbox.attr_batch, 
-                  toolbox.attr_conf, toolbox.attr_iou), n=1)
+                 (toolbox.attr_lr0, toolbox.attr_batch, toolbox.attr_conf, toolbox.attr_iou), n=1)
 toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
 
@@ -305,7 +264,6 @@ toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 # FUNCIÓN DE FITNESS
 # ============================================
 def evaluate_individual(individual: list) -> tuple:
-    """Evalúa un individuo con fitness multi-objetivo"""
     global individual_counter
     individual_counter += 1
     
@@ -326,72 +284,45 @@ def evaluate_individual(individual: list) -> tuple:
     
     try:
         print(f"\n🔬 Evaluando individuo {individual_counter}:")
-        print(f"   LR={individual[0]:.6f}, Batch={int(individual[1])}, "
-              f"Conf={individual[2]:.3f}, IoU={individual[3]:.3f}")
+        print(f"   LR={individual[0]:.6f}, Batch={int(individual[1])}, Conf={individual[2]:.3f}, IoU={individual[3]:.3f}")
         
         start_time = time.time()
-        
         model = YOLO(BASE_MODEL)
         training_results = model.train(
-            lr0=params['lr0'],
-            batch=params['batch'],
-            epochs=params['epochs'],
-            data=params['data'],
-            device=params['device'],
-            workers=params['workers'],
-            cache=params['cache'],
-            verbose=params['verbose'],
-            patience=params['patience'],
+            lr0=params['lr0'], batch=params['batch'], epochs=params['epochs'],
+            data=params['data'], device=params['device'], workers=params['workers'],
+            cache=params['cache'], verbose=params['verbose'], patience=params['patience'],
             name=params['name']
         )
         
-        results = model.val(
-            data=params['data'],
-            conf=params['conf'],
-            iou=params['iou'],
-            device=params['device'],
-            verbose=False
-        )
-        
+        results = model.val(data=params['data'], conf=params['conf'], iou=params['iou'],
+                           device=params['device'], verbose=False)
         eval_time = time.time() - start_time
         
-        f1_score = float(results.box.f1) if results.box.f1 is not None else 0.0
-        precision = float(results.box.precision) if results.box.precision is not None else 0.0
-        recall = float(results.box.recall) if results.box.recall is not None else 0.0
+        f1_score = float(results.box.f1.mean()) if results.box.f1 is not None else 0.0
+        precision = float(results.box.p.mean()) if results.box.p is not None else 0.0
+        recall = float(results.box.r.mean()) if results.box.r is not None else 0.0
         latency = results.speed['inference'] / 1000.0
         fp_rate = max(0.0, 1.0 - precision)
         
-        fitness_value = (W1_F1_SCORE * f1_score) - \
-                       (W2_FP_RATE * fp_rate) - \
-                       (W3_LATENCY * latency)
+        fitness_value = (W1_F1_SCORE * f1_score) - (W2_FP_RATE * fp_rate) - (W3_LATENCY * latency)
         
-        metrics = {
-            'f1_score': f1_score,
-            'precision': precision,
-            'recall': recall,
-            'fp_rate': fp_rate,
-            'latency': latency,
-            'eval_time': eval_time
-        }
+        metrics = {'f1_score': f1_score, 'precision': precision, 'recall': recall,
+                  'fp_rate': fp_rate, 'latency': latency, 'eval_time': eval_time}
         
-        log_individual(current_generation, individual_counter, individual, 
-                      fitness_value, metrics)
+        log_individual(current_generation, individual_counter, individual, fitness_value, metrics)
         
-        print(f"   ✓ F1={f1_score:.4f}, Precision={precision:.4f}, "
-              f"FP_Rate={fp_rate:.4f}, Latency={latency:.4f}s")
+        print(f"   ✓ F1={f1_score:.4f}, Precision={precision:.4f}, FP_Rate={fp_rate:.4f}, Latency={latency:.4f}s")
         print(f"   → Fitness={fitness_value:.4f} (evaluado en {eval_time:.1f}s)")
         
         return fitness_value,
-        
     except Exception as e:
         print(f"   ✗ Error: {e}")
-        log_individual(current_generation, individual_counter, individual,
-                      -1000.0, {'error': str(e)})
+        log_individual(current_generation, individual_counter, individual, -1000.0, {'error': str(e)})
         return -1000.0,
 
 
 def custom_mutate(individual, indpb=0.2):
-    """Mutación personalizada"""
     if random.random() < indpb:
         individual[0] = random.uniform(*HYPERPARAMS_RANGES['lr0'])
     if random.random() < indpb:
@@ -410,35 +341,25 @@ toolbox.register("select", tools.selTournament, tournsize=GA_CONFIG['tournsize']
 
 
 # ============================================
-# BASELINE (ENTRENAMIENTO ESTÁNDAR)
+# BASELINE
 # ============================================
 def train_baseline():
-    """Entrena modelo baseline sin optimización"""
     print("\n" + "=" * 80)
     print("📊 ENTRENAMIENTO BASELINE (sin optimización)")
     print("=" * 80)
     
     model = YOLO(BASE_MODEL)
-    
     print("\nEntrenando con configuración estándar...")
-    results = model.train(
-        data=DATASET_PATH,
-        epochs=GA_CONFIG['validation_epochs'],
-        batch=8,
-        device=DEVICE,
-        workers=HARDWARE_CONFIG['workers'],
-        cache=HARDWARE_CONFIG['cache'],
-        name='baseline',
-        verbose=False
-    )
+    results = model.train(data=DATASET_PATH, epochs=GA_CONFIG['validation_epochs'],
+                         batch=8, device=DEVICE, workers=HARDWARE_CONFIG['workers'],
+                         cache=HARDWARE_CONFIG['cache'], name='baseline', verbose=False)
     
     val_results = model.val(data=DATASET_PATH)
-    
     baseline_metrics = {
-        'f1': float(val_results.box.f1) if val_results.box.f1 is not None else 0.0,
-        'precision': float(val_results.box.precision) if val_results.box.precision is not None else 0.0,
-        'recall': float(val_results.box.recall) if val_results.box.recall is not None else 0.0,
-        'fp_rate': max(0.0, 1.0 - float(val_results.box.precision)) if val_results.box.precision is not None else 1.0,
+        'f1': float(val_results.box.f1.mean()) if val_results.box.f1 is not None else 0.0,
+        'precision': float(val_results.box.p.mean()) if val_results.box.p is not None else 0.0,
+        'recall': float(val_results.box.r.mean()) if val_results.box.r is not None else 0.0,
+        'fp_rate': max(0.0, 1.0 - float(val_results.box.p.mean())) if val_results.box.p is not None else 1.0,
         'latency': val_results.speed['inference'] / 1000.0
     }
     
@@ -447,7 +368,6 @@ def train_baseline():
     print(f"   Precision: {baseline_metrics['precision']:.4f}")
     print(f"   FP Rate: {baseline_metrics['fp_rate']:.4f}")
     
-    # Guardar baseline
     baseline_file = os.path.join(LOG_DIR, 'baseline_results.json')
     with open(baseline_file, 'w') as f:
         json.dump(baseline_metrics, f, indent=2)
@@ -456,10 +376,9 @@ def train_baseline():
 
 
 # ============================================
-# ALGORITMO GENÉTICO PRINCIPAL
+# GA PRINCIPAL
 # ============================================
 def run_genetic_algorithm(resume=False):
-    """Ejecuta el GA con soporte para checkpoints"""
     global current_generation, individual_counter
     
     checkpoint_mgr = CheckpointManager()
@@ -469,12 +388,10 @@ def run_genetic_algorithm(resume=False):
     print("🧬 ALGORITMO GENÉTICO PARA OPTIMIZACIÓN DE YOLOv8")
     print("=" * 80)
     
-    # Verificar dataset
     if not os.path.exists(DATASET_PATH):
         print(f"\n❌ ERROR: No se encontró {DATASET_PATH}")
         return None, None
     
-    # Intentar reanudar desde checkpoint
     if resume and checkpoint_mgr.exists():
         print("\n🔄 Reanudando desde checkpoint...")
         checkpoint = checkpoint_mgr.load()
@@ -508,7 +425,6 @@ def run_genetic_algorithm(resume=False):
     
     print(f"\n🚀 Iniciando evolución desde generación {start_gen}...\n")
     
-    # Evolución con checkpoints
     for gen in range(start_gen, GA_CONFIG['generations']):
         current_generation = gen
         individual_counter = 0
@@ -517,16 +433,12 @@ def run_genetic_algorithm(resume=False):
         print(f"GENERACIÓN {gen + 1}/{GA_CONFIG['generations']}")
         print(f"{'='*80}")
         
-        # Evaluar población
         invalid_ind = [ind for ind in population if not ind.fitness.valid]
         fitnesses = map(toolbox.evaluate, invalid_ind)
         for ind, fit in zip(invalid_ind, fitnesses):
             ind.fitness.values = fit
         
-        # Actualizar Hall of Fame
         hof.update(population)
-        
-        # Registrar estadísticas
         record = stats.compile(population)
         logbook.record(gen=gen, evals=len(invalid_ind), **record)
         
@@ -535,14 +447,11 @@ def run_genetic_algorithm(resume=False):
         print(f"   Promedio: {record['avg']:.4f}")
         print(f"   Peor: {record['min']:.4f}")
         
-        # Guardar checkpoint
-        checkpoint_mgr.save(gen, population, hof, logbook, stats)
+        checkpoint_mgr.save(gen, population, hof, logbook)
         
-        # Generar gráficas
         if gen > 0:
             visualizer.plot_evolution(logbook, f'evolution_gen{gen}.png')
         
-        # Siguiente generación
         if gen < GA_CONFIG['generations'] - 1:
             offspring = toolbox.select(population, len(population))
             offspring = list(map(toolbox.clone, offspring))
@@ -560,31 +469,21 @@ def run_genetic_algorithm(resume=False):
             
             population[:] = offspring
     
-    # Gráficas finales
     visualizer.plot_evolution(logbook, 'evolution_final.png')
     visualizer.plot_hyperparams_distribution(hof, 'hyperparams_final.png')
     
-    # Mostrar mejores individuos
     print("\n" + "=" * 80)
     print("🏆 MEJORES INDIVIDUOS")
     print("=" * 80)
     for i, ind in enumerate(hof, 1):
         print(f"\n#{i} - Fitness: {ind.fitness.values[0]:.4f}")
-        print(f"   LR: {ind[0]:.6f}, Batch: {int(ind[1])}, "
-              f"Conf: {ind[2]:.4f}, IoU: {ind[3]:.4f}")
+        print(f"   LR: {ind[0]:.6f}, Batch: {int(ind[1])}, Conf: {ind[2]:.4f}, IoU: {ind[3]:.4f}")
     
-    # Guardar mejores individuos
     best_file = os.path.join(LOG_DIR, 'best_individuals.json')
     with open(best_file, 'w') as f:
         json.dump([{
-            'rank': i,
-            'fitness': ind.fitness.values[0],
-            'hyperparams': {
-                'lr0': ind[0],
-                'batch': int(ind[1]),
-                'conf': ind[2],
-                'iou': ind[3]
-            }
+            'rank': i, 'fitness': ind.fitness.values[0],
+            'hyperparams': {'lr0': ind[0], 'batch': int(ind[1]), 'conf': ind[2], 'iou': ind[3]}
         } for i, ind in enumerate(hof, 1)], f, indent=2)
     
     return hof, logbook
@@ -594,7 +493,6 @@ def run_genetic_algorithm(resume=False):
 # ENTRENAMIENTO FINAL
 # ============================================
 def train_best_model(best_individual, epochs=None):
-    """Entrena modelo final con mejores hiperparámetros"""
     if epochs is None:
         epochs = FINAL_TRAINING_EPOCHS
     
@@ -603,17 +501,11 @@ def train_best_model(best_individual, epochs=None):
     print("=" * 80)
     
     params = {
-        'lr0': best_individual[0],
-        'batch': int(best_individual[1]),
-        'conf': best_individual[2],
-        'iou': best_individual[3],
-        'epochs': epochs,
-        'data': DATASET_PATH,
-        'device': DEVICE,
-        'workers': HARDWARE_CONFIG['workers'],
-        'cache': HARDWARE_CONFIG['cache'],
-        'name': 'best_model_ga_optimized',
-        'verbose': True,
+        'lr0': best_individual[0], 'batch': int(best_individual[1]),
+        'conf': best_individual[2], 'iou': best_individual[3],
+        'epochs': epochs, 'data': DATASET_PATH, 'device': DEVICE,
+        'workers': HARDWARE_CONFIG['workers'], 'cache': HARDWARE_CONFIG['cache'],
+        'name': 'best_model_ga_optimized', 'verbose': True,
     }
     
     print(f"\n📊 Hiperparámetros optimizados:")
@@ -623,14 +515,13 @@ def train_best_model(best_individual, epochs=None):
     
     model = YOLO(BASE_MODEL)
     results = model.train(**params)
-    
     val_results = model.val(data=params['data'])
     
     ga_metrics = {
-        'f1': float(val_results.box.f1) if val_results.box.f1 is not None else 0.0,
-        'precision': float(val_results.box.precision) if val_results.box.precision is not None else 0.0,
-        'recall': float(val_results.box.recall) if val_results.box.recall is not None else 0.0,
-        'fp_rate': max(0.0, 1.0 - float(val_results.box.precision)) if val_results.box.precision is not None else 1.0,
+        'f1': float(val_results.box.f1.mean()) if val_results.box.f1 is not None else 0.0,
+        'precision': float(val_results.box.p.mean()) if val_results.box.p is not None else 0.0,
+        'recall': float(val_results.box.r.mean()) if val_results.box.r is not None else 0.0,
+        'fp_rate': max(0.0, 1.0 - float(val_results.box.p.mean())) if val_results.box.p is not None else 1.0,
         'latency': val_results.speed['inference'] / 1000.0
     }
     
@@ -644,12 +535,10 @@ def train_best_model(best_individual, epochs=None):
 # COMPARACIÓN
 # ============================================
 def compare_results():
-    """Compara baseline vs GA optimizado"""
     print("\n" + "=" * 80)
     print("📊 COMPARACIÓN: BASELINE VS GA OPTIMIZADO")
     print("=" * 80)
     
-    # Cargar resultados
     baseline_file = os.path.join(LOG_DIR, 'baseline_results.json')
     ga_file = os.path.join(LOG_DIR, 'ga_optimized_results.json')
     
@@ -663,11 +552,9 @@ def compare_results():
     
     with open(baseline_file) as f:
         baseline = json.load(f)
-    
     with open(ga_file) as f:
         ga_optimized = json.load(f)
     
-    # Mostrar comparación
     print("\n📈 Resultados:")
     print(f"\n{'Métrica':<20} {'Baseline':<12} {'GA Optimizado':<15} {'Mejora':>10}")
     print("-" * 60)
@@ -676,7 +563,6 @@ def compare_results():
         b_val = baseline[metric]
         g_val = ga_optimized[metric]
         
-        # Para FP Rate y Latency, menor es mejor
         if metric in ['fp_rate', 'latency']:
             improvement = ((b_val - g_val) / b_val * 100) if b_val > 0 else 0
         else:
@@ -685,75 +571,226 @@ def compare_results():
         symbol = '✓' if improvement > 0 else '✗'
         print(f"{metric:<20} {b_val:<12.4f} {g_val:<15.4f} {symbol} {improvement:>8.2f}%")
     
-    # Generar gráfica
     visualizer = GAVisualizer()
     visualizer.plot_comparison(baseline, ga_optimized, 'comparison_final.png')
-    
     print(f"\n💾 Gráficas guardadas en: {PLOTS_DIR}")
 
 
 # ============================================
-# FUNCIÓN PRINCIPAL
+# DETECCIÓN DE ESTADO
 # ============================================
-def main():
-    """Pipeline completo del sistema - MODO AUTOMÁTICO"""
+def detect_pipeline_state():
+    state = {'baseline_done': False, 'ga_done': False, 'final_training_done': False, 'comparison_done': False}
+    
+    if os.path.exists(os.path.join(LOG_DIR, 'baseline_results.json')):
+        state['baseline_done'] = True
+    
+    checkpoint_mgr = CheckpointManager()
+    if checkpoint_mgr.exists():
+        checkpoint = checkpoint_mgr.load()
+        if checkpoint and checkpoint['generation'] >= GA_CONFIG['generations'] - 1:
+            state['ga_done'] = True
+    
+    if os.path.exists(os.path.join(LOG_DIR, 'best_individuals.json')):
+        state['ga_done'] = True
+    
+    if os.path.exists(os.path.join(LOG_DIR, 'ga_optimized_results.json')):
+        state['final_training_done'] = True
+    
+    if os.path.exists(os.path.join(PLOTS_DIR, 'comparison_final.png')):
+        state['comparison_done'] = True
+    
+    return state
+
+
+# ============================================
+# PIPELINE PRINCIPAL
+# ============================================
+def main(force_restart=False):
     print("\n" + "=" * 80)
     print("🎯 SISTEMA COMPLETO DE OPTIMIZACIÓN CON GA")
     print("=" * 80)
     
-    print("\n🚀 Ejecutando pipeline completo automáticamente...\n")
+    if not force_restart:
+        state = detect_pipeline_state()
+        print("\n🔍 Detectando estado del pipeline...")
+        print(f"   {'✅' if state['baseline_done'] else '⏳'} Baseline: {'Completado' if state['baseline_done'] else 'Pendiente'}")
+        print(f"   {'✅' if state['ga_done'] else '⏳'} GA: {'Completado' if state['ga_done'] else 'Pendiente/En progreso'}")
+        print(f"   {'✅' if state['final_training_done'] else '⏳'} Entrenamiento Final: {'Completado' if state['final_training_done'] else 'Pendiente'}")
+        print(f"   {'✅' if state['comparison_done'] else '⏳'} Comparación: {'Completado' if state['comparison_done'] else 'Pendiente'}")
+    else:
+        print("\n🔄 Reiniciando pipeline desde cero")
+        state = {'baseline_done': False, 'ga_done': False, 'final_training_done': False, 'comparison_done': False}
     
     try:
-        # Paso 1: Baseline
-        print("\n" + "="*80)
-        print("PASO 1/4: BASELINE")
-        print("="*80)
-        baseline = train_baseline()
+        if not state['baseline_done']:
+            print("\n" + "="*80)
+            print("PASO 1/4: BASELINE")
+            print("="*80)
+            baseline = train_baseline()
+        else:
+            print("\n⏭️  Saltando Paso 1: Baseline ya completado")
         
-        # Paso 2: GA
-        print("\n" + "="*80)
-        print("PASO 2/4: ALGORITMO GENÉTICO")
-        print("="*80)
-        hof, logbook = run_genetic_algorithm(resume=False)
+        if not state['ga_done']:
+            print("\n" + "="*80)
+            print("PASO 2/4: ALGORITMO GENÉTICO")
+            print("="*80)
+            checkpoint_mgr = CheckpointManager()
+            resume = checkpoint_mgr.exists() and not force_restart
+            if resume:
+                print("🔄 Detectado checkpoint, reanudando...")
+            hof, logbook = run_genetic_algorithm(resume=resume)
+            if hof is None:
+                print("\n❌ Error en GA. Abortando pipeline.")
+                return
+        else:
+            print("\n⏭️  Saltando Paso 2: GA ya completado")
+            best_file = os.path.join(LOG_DIR, 'best_individuals.json')
+            with open(best_file) as f:
+                best_data = json.load(f)
+            hof = tools.HallOfFame(3)
+            for item in best_data:
+                ind = creator.Individual([
+                    item['hyperparams']['lr0'],
+                    item['hyperparams']['batch'],
+                    item['hyperparams']['conf'],
+                    item['hyperparams']['iou']
+                ])
+                ind.fitness.values = (item['fitness'],)
+                hof.insert(ind)
         
-        if hof is None:
-            print("\n❌ Error en GA. Abortando pipeline.")
-            return
+        if not state['final_training_done']:
+            print("\n" + "="*80)
+            print("PASO 3/4: ENTRENAMIENTO FINAL")
+            print("="*80)
+            best_individual = hof[0]
+            model, results, ga_metrics = train_best_model(best_individual)
+            ga_file = os.path.join(LOG_DIR, 'ga_optimized_results.json')
+            with open(ga_file, 'w') as f:
+                json.dump(ga_metrics, f, indent=2)
+        else:
+            print("\n⏭️  Saltando Paso 3: Entrenamiento final ya completado")
         
-        # Paso 3: Entrenamiento final
-        print("\n" + "="*80)
-        print("PASO 3/4: ENTRENAMIENTO FINAL")
-        print("="*80)
-        best_individual = hof[0]
-        model, results, ga_metrics = train_best_model(best_individual)
-        
-        # Guardar resultados GA
-        ga_file = os.path.join(LOG_DIR, 'ga_optimized_results.json')
-        with open(ga_file, 'w') as f:
-            json.dump(ga_metrics, f, indent=2)
-        
-        # Paso 4: Comparación
-        print("\n" + "="*80)
-        print("PASO 4/4: COMPARACIÓN")
-        print("="*80)
-        compare_results()
+        if not state['comparison_done'] or not state['final_training_done']:
+            print("\n" + "="*80)
+            print("PASO 4/4: COMPARACIÓN")
+            print("="*80)
+            compare_results()
+        else:
+            print("\n⏭️  Saltando Paso 4: Comparación ya completada")
         
         print("\n" + "="*80)
         print("✅ PIPELINE COMPLETO FINALIZADO")
         print("="*80)
-        print(f"\n📁 Resultados en:")
-        print(f"   - Logs: {LOG_DIR}")
-        print(f"   - Checkpoints: {CHECKPOINT_DIR}")
-        print(f"   - Gráficas: {PLOTS_DIR}")
+        print(f"\n📁 Resultados guardados en:")
+        print(f"   - Logs: {LOG_DIR}/")
+        print(f"   - Checkpoints: {CHECKPOINT_DIR}/")
+        print(f"   - Gráficas: {PLOTS_DIR}/")
+        
+        print(f"\n🏆 Mejores hiperparámetros encontrados:")
+        print(f"   Learning Rate: {hof[0][0]:.6f}")
+        print(f"   Batch Size: {int(hof[0][1])}")
+        print(f"   Confidence: {hof[0][2]:.4f}")
+        print(f"   IoU: {hof[0][3]:.4f}")
+        
+        baseline_file = os.path.join(LOG_DIR, 'baseline_results.json')
+        ga_file = os.path.join(LOG_DIR, 'ga_optimized_results.json')
+        
+        if os.path.exists(baseline_file) and os.path.exists(ga_file):
+            with open(baseline_file) as f:
+                baseline_metrics = json.load(f)
+            with open(ga_file) as f:
+                ga_metrics = json.load(f)
+            
+            print(f"\n📊 Mejora GA vs Baseline:")
+            f1_improvement = ((ga_metrics['f1'] - baseline_metrics['f1']) / baseline_metrics['f1'] * 100)
+            fp_improvement = ((baseline_metrics['fp_rate'] - ga_metrics['fp_rate']) / baseline_metrics['fp_rate'] * 100)
+            print(f"   F1-Score: {f1_improvement:+.2f}%")
+            print(f"   FP Rate: {fp_improvement:+.2f}% (reducción)")
+        
+        print("\n" + "="*80)
         
     except KeyboardInterrupt:
         print("\n\n⚠️  Ejecución interrumpida por el usuario")
+        print("💡 Puedes reanudar ejecutando el script de nuevo")
     except Exception as e:
         print(f"\n❌ Error: {e}")
         import traceback
         traceback.print_exc()
 
 
+def show_status():
+    state = detect_pipeline_state()
+    print("\n" + "=" * 80)
+    print("📊 ESTADO ACTUAL DEL PIPELINE")
+    print("=" * 80)
+    
+    steps = [
+        ("Paso 1: Baseline", state['baseline_done']),
+        ("Paso 2: GA", state['ga_done']),
+        ("Paso 3: Entrenamiento Final", state['final_training_done']),
+        ("Paso 4: Comparación", state['comparison_done'])
+    ]
+    
+    for step_name, completed in steps:
+        status = "✅ Completado" if completed else "⏳ Pendiente"
+        print(f"   {step_name:<30} {status}")
+    
+    print(f"\n📁 Archivos generados:")
+    files_to_check = [
+        (os.path.join(LOG_DIR, 'baseline_results.json'), "Baseline"),
+        (os.path.join(LOG_DIR, 'best_individuals.json'), "Mejores individuos"),
+        (os.path.join(LOG_DIR, 'ga_optimized_results.json'), "Resultados GA"),
+        (os.path.join(PLOTS_DIR, 'evolution_final.png'), "Gráfica evolución"),
+        (os.path.join(PLOTS_DIR, 'comparison_final.png'), "Gráfica comparación"),
+    ]
+    
+    for filepath, description in files_to_check:
+        if os.path.exists(filepath):
+            print(f"   ✓ {description}: {filepath}")
+    print("=" * 80)
+
+
+def resume_pipeline():
+    print("🔄 Reanudando pipeline desde el último checkpoint...\n")
+    main(force_restart=False)
+
+
+def restart_pipeline():
+    print("🔄 Reiniciando pipeline desde cero...\n")
+    response = input("⚠️  Esto eliminará el progreso actual. ¿Continuar? (s/n): ")
+    if response.lower() == 's':
+        checkpoint_file = os.path.join(CHECKPOINT_DIR, 'ga_checkpoint.pkl')
+        if os.path.exists(checkpoint_file):
+            os.remove(checkpoint_file)
+            print("✓ Checkpoint eliminado")
+        main(force_restart=True)
+    else:
+        print("❌ Operación cancelada")
+
+
 if __name__ == "__main__":
     multiprocessing.freeze_support()
-    main()
+    import sys
+    
+    if len(sys.argv) > 1:
+        command = sys.argv[1].lower()
+        if command == 'status':
+            show_status()
+        elif command == 'resume':
+            resume_pipeline()
+        elif command == 'restart':
+            restart_pipeline()
+        elif command == 'help':
+            print("\n🎯 Comandos disponibles:")
+            print("   python train-GA.py               - Ejecutar/reanudar automáticamente")
+            print("   python train-GA.py status        - Ver estado del pipeline")
+            print("   python train-GA.py resume        - Reanudar desde checkpoint")
+            print("   python train-GA.py restart       - Reiniciar desde cero")
+            print("   python train-GA.py help          - Mostrar esta ayuda\n")
+        else:
+            print(f"❌ Comando desconocido: {command}")
+            print("   Usa 'help' para ver comandos disponibles")
+    else:
+        print("\n💡 TIP: Usa 'python train-GA.py help' para ver más opciones\n")
+        main(force_restart=False)
