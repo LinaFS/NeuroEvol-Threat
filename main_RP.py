@@ -1,14 +1,15 @@
 """
-main.py - SISTEMA MULTI-CLASE INTELIGENTE
+main.py - SISTEMA MULTI-CLASE INTELIGENTE - VERSIÓN MEJORADA
 Mejoras:
 - Detecta 80 clases COCO (no solo personas)
 - Identifica objetos de riesgo (mochilas, cuchillos, vehículos)
 - Detecta asociaciones persona-objeto
 - Detecta objetos abandonados
 - Análisis contextual de riesgo
+- ✨ NUEVO: Desaparición rápida de detecciones (sin lag)
 """
 
-print("--- SISTEMA MULTI-CLASE INICIADO ---")
+print("--- SISTEMA MULTI-CLASE MEJORADO INICIADO ---")
 
 from ultralytics import YOLO
 import cv2
@@ -58,8 +59,8 @@ COLOR_SOSPECHOSO = (0, 165, 255)  # Naranja
 COLOR_VEHICULO = (255, 165, 0)  # Azul-Naranja
 COLOR_NORMAL = (200, 200, 200)  # Gris
 
-# Parámetros
-MAX_DISAPPEARED = 30
+# Parámetros - ✨ MEJORADOS para desaparición rápida
+MAX_DISAPPEARED = 5  # ✨ Reducido de 30 a 5 frames
 DISTANCE_THRESHOLD = 50
 LOITERING_TIME = 10
 CONFIDENCE_GENERAL = 0.3
@@ -130,30 +131,34 @@ def get_class_info(class_id):
 
 
 # ============================================
-# CLASE: MULTI-CLASS TRACKER
+# CLASE: MULTI-CLASS TRACKER - ✨ MEJORADO
 # ============================================
 class MultiClassTracker:
-    """Tracker que maneja múltiples clases de objetos"""
-    def __init__(self, max_disappeared=30):
+    """Tracker que maneja múltiples clases - ✨ Desaparición rápida"""
+    def __init__(self, max_disappeared=5, confidence_threshold=0.3):
         self.next_id = 0
-        self.objects = {}  # id: centroid
-        self.disappeared = {}  # id: count
+        self.objects = {}
+        self.disappeared = {}
         self.trajectories = defaultdict(lambda: deque(maxlen=90))
-        self.class_history = {}  # id: class_id
-        self.first_seen = {}  # id: timestamp
+        self.class_history = {}
+        self.first_seen = {}
+        self.last_confidence = {}  # ✨ NUEVO
         self.max_disappeared = max_disappeared
+        self.confidence_threshold = confidence_threshold
         
-    def register(self, centroid, bbox, class_id):
+    def register(self, centroid, bbox, class_id, confidence=1.0):
         """Registrar nuevo objeto"""
         self.objects[self.next_id] = centroid
         self.disappeared[self.next_id] = 0
         self.class_history[self.next_id] = class_id
         self.first_seen[self.next_id] = time.time()
+        self.last_confidence[self.next_id] = confidence  # ✨ NUEVO
         self.trajectories[self.next_id].append({
             'centroid': centroid,
             'bbox': bbox,
             'timestamp': time.time(),
-            'class_id': class_id
+            'class_id': class_id,
+            'confidence': confidence
         })
         self.next_id += 1
         return self.next_id - 1
@@ -166,13 +171,21 @@ class MultiClassTracker:
             del self.class_history[object_id]
         if object_id in self.first_seen:
             del self.first_seen[object_id]
+        if object_id in self.last_confidence:
+            del self.last_confidence[object_id]
     
     def update(self, detections):
         """
-        Actualizar tracker
+        Actualizar tracker - ✨ Con eliminación inteligente
         detections: List[(x1, y1, x2, y2, confidence, class)]
         Returns: Dict[id: (bbox, class_id, time_tracked)]
         """
+        # ✨ NUEVO: Eliminar objetos con baja confianza persistente
+        for object_id in list(self.objects.keys()):
+            if self.last_confidence.get(object_id, 1.0) < self.confidence_threshold * 0.6:
+                if self.disappeared[object_id] > 2:
+                    self.deregister(object_id)
+        
         if len(detections) == 0:
             for object_id in list(self.disappeared.keys()):
                 self.disappeared[object_id] += 1
@@ -183,6 +196,7 @@ class MultiClassTracker:
         input_centroids = []
         input_bboxes = []
         input_classes = []
+        input_confidences = []
         
         for det in detections:
             x1, y1, x2, y2, conf, cls = det
@@ -191,10 +205,11 @@ class MultiClassTracker:
             input_centroids.append((cx, cy))
             input_bboxes.append((x1, y1, x2, y2))
             input_classes.append(int(cls))
+            input_confidences.append(conf)
         
         if len(self.objects) == 0:
             for i, centroid in enumerate(input_centroids):
-                self.register(centroid, input_bboxes[i], input_classes[i])
+                self.register(centroid, input_bboxes[i], input_classes[i], input_confidences[i])
         else:
             object_ids = list(self.objects.keys())
             object_centroids = list(self.objects.values())
@@ -223,11 +238,13 @@ class MultiClassTracker:
                 self.objects[object_id] = input_centroids[col]
                 self.disappeared[object_id] = 0
                 self.class_history[object_id] = input_classes[col]
+                self.last_confidence[object_id] = input_confidences[col]  # ✨ NUEVO
                 self.trajectories[object_id].append({
                     'centroid': input_centroids[col],
                     'bbox': input_bboxes[col],
                     'timestamp': time.time(),
-                    'class_id': input_classes[col]
+                    'class_id': input_classes[col],
+                    'confidence': input_confidences[col]
                 })
                 
                 used_rows.add(row)
@@ -237,12 +254,16 @@ class MultiClassTracker:
             for row in unused_rows:
                 object_id = object_ids[row]
                 self.disappeared[object_id] += 1
-                if self.disappeared[object_id] > self.max_disappeared:
+                
+                # ✨ MEJORA: Eliminar inmediatamente si la confianza es muy baja
+                if (self.disappeared[object_id] > self.max_disappeared or 
+                    self.last_confidence.get(object_id, 1.0) < self.confidence_threshold * 0.5):
                     self.deregister(object_id)
             
             unused_cols = set(range(len(input_centroids))) - used_cols
             for col in unused_cols:
-                self.register(input_centroids[col], input_bboxes[col], input_classes[col])
+                self.register(input_centroids[col], input_bboxes[col], 
+                            input_classes[col], input_confidences[col])
         
         # Retornar objetos activos con información completa
         active_objects = {}
@@ -352,18 +373,15 @@ class ContextAnalyzer:
         abandoned = []
         
         for obj_id, (obj_bbox, obj_class, time_tracked) in object_tracks.items():
-            # Solo objetos sospechosos
             if obj_class not in OBJETOS_SOSPECHOSOS:
                 continue
             
-            # Verificar tiempo mínimo
             if time_tracked < ABANDONED_TIME_THRESHOLD:
                 continue
             
-            # Verificar si hay personas cerca
             has_person_nearby = False
             for person_id, (person_bbox, person_class, _) in person_tracks.items():
-                if person_class != 0:  # Solo personas
+                if person_class != 0:
                     continue
                 
                 distance = bbox_distance(obj_bbox, person_bbox)
@@ -425,8 +443,8 @@ def main(video_source):
     print("✅ Modelos cargados")
     
     # Inicializar trackers (separados por tipo)
-    tracker_objetos = MultiClassTracker()
-    tracker_armas = MultiClassTracker()
+    tracker_objetos = MultiClassTracker(max_disappeared=MAX_DISAPPEARED)
+    tracker_armas = MultiClassTracker(max_disappeared=MAX_DISAPPEARED)
     behavior_analyzer = BehaviorAnalyzer()
     context_analyzer = ContextAnalyzer()
     
@@ -439,9 +457,9 @@ def main(video_source):
         return
     
     frame_count = 0
-    alert_history = []
     
-    print("\n🚀 Sistema Multi-Clase Iniciado")
+    print("\n🚀 Sistema Multi-Clase Mejorado Iniciado")
+    print("✨ Desaparición rápida activada (5 frames)")
     print("━" * 60)
     
     try:
@@ -458,10 +476,9 @@ def main(video_source):
             resultados_generales = modelo_general(frame, verbose=False)[0]
             resultados_armas = modelo_armas(frame, verbose=False)[0]
             
-            # CAMBIO CRÍTICO: Ya NO filtramos solo personas
             detecciones_objetos = []
             for r in resultados_generales.boxes.data.cpu().numpy():
-                if r[4] > CONFIDENCE_GENERAL:  # Sin filtro de clase
+                if r[4] > CONFIDENCE_GENERAL:
                     detecciones_objetos.append(r)
             
             detecciones_armas = []
@@ -506,7 +523,6 @@ def main(video_source):
                 trajectory = list(tracker_objetos.trajectories[track_id])
                 
                 if len(trajectory) >= 5:
-                    # Verificar si tiene arma cerca
                     weapon_nearby = any(
                         bbox_distance(bbox, arma_bbox) < 100
                         for _, (arma_bbox, _, _) in tracks_armas.items()
@@ -526,7 +542,7 @@ def main(video_source):
                         })
             
             # ═══════════════════════════════════════════════════
-            # VISUALIZACIÓN
+            # VISUALIZACIÓN - ✨ Con fade out suave
             # ═══════════════════════════════════════════════════
             
             # 1. Dibujar todos los objetos detectados
@@ -534,23 +550,28 @@ def main(video_source):
                 x1, y1, x2, y2 = bbox
                 class_name, color, risk = get_class_info(class_id)
                 
-                cv2.rectangle(frame_display, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+                # ✨ Fade out basado en frames sin detectar
+                disappeared_frames = tracker_objetos.disappeared.get(track_id, 0)
+                alpha = max(0.4, 1.0 - (disappeared_frames / MAX_DISAPPEARED))
+                faded_color = tuple(int(c * alpha) for c in color)
+                
+                cv2.rectangle(frame_display, (int(x1), int(y1)), (int(x2), int(y2)), faded_color, 2)
                 label = f'{class_name} ID:{track_id}'
                 cv2.putText(frame_display, label, (int(x1), int(y1)-10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, faded_color, 2)
             
             # 2. Dibujar armas
             for track_id, (bbox, class_id, _) in tracks_armas.items():
                 x1, y1, x2, y2 = bbox
                 cv2.rectangle(frame_display, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 5)
-                cv2.putText(frame_display, 'ARMA DETECTADA', (int(x1), int(y1)-10),
+                cv2.putText(frame_display, '⚠️ ARMA DETECTADA', (int(x1), int(y1)-10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 3)
             
             # 3. Dibujar objetos abandonados
             for obj in objetos_abandonados:
                 x1, y1, x2, y2 = obj['bbox']
                 cv2.rectangle(frame_display, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 4)
-                cv2.putText(frame_display, f'OBJETO ABANDONADO ({obj["time"]:.1f}s)', 
+                cv2.putText(frame_display, f'🚨 OBJETO ABANDONADO ({obj["time"]:.1f}s)', 
                             (int(x1), int(y1)-30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
@@ -561,7 +582,7 @@ def main(video_source):
                 
                 x1, y1, x2, y2 = person_bbox
                 color = (0, 0, 255) if assoc['risk_level'] == 3 else (0, 165, 255)
-                label = f"ALERTA: {obj_name.upper()}"
+                label = f"⚠️ ALERTA: {obj_name.upper()}"
                 cv2.putText(frame_display, label, (int(x1), int(y1)-50),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
             
@@ -571,13 +592,13 @@ def main(video_source):
                 
                 if alerta['alert_level'] == 3:
                     color = (0, 0, 255)
-                    label = f"ALERTA MAX: {alerta['behavior'].upper()}"
+                    label = f"🚨 ALERTA MAX: {alerta['behavior'].upper()}"
                 elif alerta['alert_level'] == 2:
                     color = (0, 165, 255)
-                    label = f"ALERTA: {alerta['behavior'].upper()}"
+                    label = f"⚠️ ALERTA: {alerta['behavior'].upper()}"
                 else:
                     color = (0, 255, 255)
-                    label = f"AVISO: {alerta['behavior'].upper()}"
+                    label = f"ℹ️ AVISO: {alerta['behavior'].upper()}"
                 
                 cv2.rectangle(frame_display, (int(x1), int(y1)), (int(x2), int(y2)), color, 4)
                 cv2.putText(frame_display, label, (int(x1), int(y1)-70),
@@ -603,7 +624,11 @@ def main(video_source):
             cv2.putText(frame_display, info_text, (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
-            cv2.imshow('Sistema Multi-Clase Inteligente', frame_display)
+            # ✨ Indicador de desaparición rápida
+            cv2.putText(frame_display, "✨ Fast Disappear: ON", (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            
+            cv2.imshow('Sistema Multi-Clase Mejorado', frame_display)
             
             key = cv2.waitKey(1) & 0xFF
             if key == 27:  # ESC
@@ -624,14 +649,21 @@ def main(video_source):
         cap.release()
         cv2.destroyAllWindows()
         print("\n✅ Sistema finalizado")
+        print("━" * 60)
+        print("✨ Mejoras aplicadas:")
+        print("  • Desaparición rápida: 5 frames (antes 30)")
+        print("  • Eliminación inteligente por confianza")
+        print("  • Fade out visual suave")
+        print("━" * 60)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Sistema Multi-Clase Inteligente')
-    parser.add_argument('--source', type=str, default='0', help='Fuente de video')
-    parser.add_argument('--confidence-general', type=float, default=0.3)
-    parser.add_argument('--confidence-behavior', type=float, default=0.5)
-    parser.add_argument('--confidence-weapon', type=float, default=0.70)
+    parser = argparse.ArgumentParser(description='Sistema Multi-Clase Inteligente Mejorado')
+    parser.add_argument('--source', type=str, default='0', help='Fuente de video (0 para webcam)')
+    parser.add_argument('--confidence-general', type=float, default=0.3, help='Confianza detección general')
+    parser.add_argument('--confidence-behavior', type=float, default=0.5, help='Confianza comportamientos')
+    parser.add_argument('--confidence-weapon', type=float, default=0.70, help='Confianza armas')
+    parser.add_argument('--max-disappeared', type=int, default=5, help='Frames antes de eliminar (default: 5)')
     
     args = parser.parse_args()
     
@@ -639,6 +671,16 @@ if __name__ == "__main__":
     CONFIDENCE_GENERAL = args.confidence_general
     CONFIDENCE_SOSPECHOSO = args.confidence_behavior
     CONFIDENCE_ARMAS = args.confidence_weapon
+    MAX_DISAPPEARED = args.max_disappeared
     
-    print("--- SISTEMA MULTI-CLASE INICIADO ---")
+    print("=" * 60)
+    print("🚀 SISTEMA MULTI-CLASE MEJORADO")
+    print("=" * 60)
+    print(f"✨ Desaparición rápida: {MAX_DISAPPEARED} frames")
+    print(f"📹 Fuente: {args.source}")
+    print(f"🎯 Confianza General: {CONFIDENCE_GENERAL}")
+    print(f"🎯 Confianza Comportamiento: {CONFIDENCE_SOSPECHOSO}")
+    print(f"🎯 Confianza Armas: {CONFIDENCE_ARMAS}")
+    print("=" * 60)
+    
     main(args.source)
