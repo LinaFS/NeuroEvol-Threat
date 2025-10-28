@@ -1,11 +1,12 @@
 """
-main.py - VERSIÓN CORREGIDA CON RECONOCIMIENTO DE PATRONES TEMPORALES
+main.py - VERSIÓN CORREGIDA
 Correcciones:
-- Error self._bbox_overlap arreglado
-- Umbral de confianza ajustado
-- Análisis temporal mejorado
-- Mejor visualización de armas
+- *** RE-AJUSTE DE SENSIBILIDAD (BALANCEO) ***
+- 1. Aumentada sensibilidad de MODELO_SOSPECHOSO (0.5) para que detecte acciones.
+- 2. Reducida sensibilidad de BehaviorAnalyzer (movimiento) para evitar "RUNNING" falsos.
 """
+
+print("--- SCRIPT CARGADO POR PYTHON ---") # <-- Diagnóstico
 
 from ultralytics import YOLO
 import cv2
@@ -34,7 +35,6 @@ from classes_config import (
 # ============================================
 # ¡NUEVO! IMPORTAR TU CONFIGURACIÓN DE CLASES
 # ============================================
-# (Asegúrate que classes_config.py esté en la misma carpeta)
 try:
     import classes_config as cfg
 except ImportError:
@@ -46,21 +46,23 @@ except ImportError:
 # CONFIGURACIÓN
 # ============================================
 MODELO_GENERAL = 'yolov8n.pt'
-MODELO_SOSPECHOSO = 'ModeloSospechaOptimizado/best_model_ga_optimized/weights/best.pt'
-MODELO_ARMAS = 'ModeloArmasOptimizado/best_model_ga_optimized/weights/best.pt'
+MODELO_SOSPECHOSO = r'C:\Users\admi\Downloads\NeuroEvol-Threat-master\ModeloSopechaOptimizado\best_model_ga_optimized\weights\best.pt'
+MODELO_ARMAS = r'C:\Users\admi\Downloads\NeuroEvol-Threat-master\ModeloArmasOptimizado\best_model_ga_optimized\weights\best.pt'
+
 
 # Parámetros de tracking
 MAX_DISAPPEARED = 30
 DISTANCE_THRESHOLD = 50
 
 # Parámetros de análisis temporal (AJUSTADOS)
-WINDOW_SIZE = 15  # Reducido de 30 a 15 frames para detección más rápida
-LOITERING_TIME = 5  # Reducido de 10 a 5 segundos
-VELOCITY_THRESHOLD = 3  # Más sensible
+WINDOW_SIZE = 15
+LOITERING_TIME = 10  # <-- ### NUEVA CORRECCIÓN ### Aumentado a 10s
+VELOCITY_THRESHOLD = 3 # (Esta variable no se usa, el valor real está en la clase)
 
-# Umbrales de confianza (AJUSTADOS)
-CONFIDENCE_GENERAL = 0.3  # Reducido de 0.5 a 0.3
-CONFIDENCE_ARMAS = 0.25   # Más sensible para armas
+# --- RE-AJUSTE DE UMBRALES ---
+CONFIDENCE_GENERAL = 0.3
+CONFIDENCE_SOSPECHOSO = 0.5 # <-- ### NUEVA CORRECCIÓN ### Bajado a 0.5 (punto medio)
+CONFIDENCE_ARMAS = 0.70   # <-- Mantenemos este alto
 
 # ============================================
 # FUNCIONES AUXILIARES
@@ -218,14 +220,15 @@ class BehaviorAnalyzer:
     """Analiza trayectorias para detectar comportamientos sospechosos"""
     def __init__(self):
         self.alert_cooldown = {}
-        self.cooldown_time = 5  # Reducido de 10 a 5 segundos
+        self.cooldown_time = 5
     
     def analyze_trajectory(self, trajectory, track_id, weapon_detected=False):
         """
         Analizar trayectoria y determinar comportamiento
         Returns: (behavior, alert_level, features)
         """
-        if len(trajectory) < 3:  # Reducido de 5 a 3
+        # --- ### NUEVA CORRECCIÓN ###: Requerir más frames para ser más estable
+        if len(trajectory) < 5: 
             return 'normal', 0, {}
         
         features = self._extract_features(trajectory)
@@ -238,18 +241,18 @@ class BehaviorAnalyzer:
             behavior = 'weapon_carry'
             alert_level = 3
         
-        # 2. LOITERING (Merodeando)
-        elif features['dwelling_time'] > LOITERING_TIME and features['velocity_mean'] < 1.0:
+        # --- ### NUEVA CORRECCIÓN ###: Hacer LOITERING menos sensible
+        elif features['dwelling_time'] > LOITERING_TIME and features['velocity_mean'] < 0.5: # <-- Más estricto (0.5)
             behavior = 'loitering'
             alert_level = 2
         
-        # 3. MOVIMIENTO ERRÁTICO
-        elif features['direction_changes'] > 5 and features['velocity_std'] > 2.0:  # Más sensible
+        # --- ### NUEVA CORRECCIÓN ###: Hacer ERRATIC menos sensible
+        elif features['direction_changes'] > 8 and features['velocity_std'] > 3.0: # <-- Más estricto (8 cambios)
             behavior = 'erratic_movement'
             alert_level = 2
         
-        # 4. VELOCIDAD ANORMAL
-        elif features['velocity_mean'] > 8.0:  # Reducido de 10 a 8
+        # --- ### NUEVA CORRECCIÓN ###: Hacer RUNNING menos sensible
+        elif features['velocity_mean'] > 12.0: # <-- Más estricto (12.0)
             behavior = 'running'
             alert_level = 1
         
@@ -320,11 +323,19 @@ class BehaviorAnalyzer:
 # ============================================
 # FUNCIÓN PRINCIPAL
 # ============================================
-def main():
+def main(video_source):
     # Cargar modelos
     print("🔧 Cargando modelos...")
     modelo_general = YOLO(MODELO_GENERAL)
     modelo_armas = YOLO(MODELO_ARMAS)
+    
+    try:
+        modelo_sospechoso = YOLO(MODELO_SOSPECHOSO)
+    except Exception as e:
+        print(f"❌ ERROR: No se pudo cargar el modelo 'MODELO_SOSPECHOSO': {MODELO_SOSPECHOSO}")
+        print(f"Error: {e}")
+        return
+    
     print("✅ Modelos cargados")
     
     # Inicializar
@@ -333,10 +344,11 @@ def main():
     behavior_analyzer = BehaviorAnalyzer()
     
     # Captura de video
-    cap = cv2.VideoCapture(0)
+    source_input = 0 if video_source == '0' else video_source
+    cap = cv2.VideoCapture(source_input)
     
     if not cap.isOpened():
-        print("❌ Error: No se pudo abrir la fuente de video")
+        print(f"❌ Error: No se pudo abrir la fuente de video: {video_source}")
         return
     
     frame_count = 0
@@ -349,7 +361,9 @@ def main():
     try:
         while True:
             ret, frame = cap.read()
+                
             if not ret:
+                print("...video finalizado.")
                 break
             
             frame_display = frame.copy()
@@ -359,17 +373,25 @@ def main():
             # ═══════════════════════════════════════════════════
             resultados_generales = modelo_general(frame, verbose=False)[0]
             resultados_armas = modelo_armas(frame, verbose=False)[0]
+            resultados_sospechosos = modelo_sospechoso(frame, verbose=False)[0]
+            
             
             # Convertir con umbral ajustado
             detecciones_generales = []
             for r in resultados_generales.boxes.data.cpu().numpy():
-                if r[4] > CONFIDENCE_GENERAL:
+                if int(r[5]) == 0 and r[4] > CONFIDENCE_GENERAL:
                     detecciones_generales.append(r)
             
             detecciones_armas = []
             for r in resultados_armas.boxes.data.cpu().numpy():
-                if r[4] > CONFIDENCE_ARMAS:
+                if r[4] > CONFIDENCE_ARMAS: # <-- Umbral alto (0.7) se aplica aquí
                     detecciones_armas.append(r)
+            
+            detecciones_sospechosas = []
+            for r in resultados_sospechosos.boxes.data.cpu().numpy():
+                if r[4] > CONFIDENCE_SOSPECHOSO: # <-- Umbral (0.5) se aplica aquí
+                    detecciones_sospechosas.append(r)
+            
             
             # DEBUG: Mostrar detecciones de armas
             if len(detecciones_armas) > 0:
@@ -382,28 +404,25 @@ def main():
             tracks_armas = tracker_armas.update(detecciones_armas)
             
             # ═══════════════════════════════════════════════════
-            # ANÁLISIS DE COMPORTAMIENTO
+            # ANÁLISIS DE COMPORTAMIENTO (MOVIMIENTO)
             # ═══════════════════════════════════════════════════
             alertas_activas = []
             
             for track_id, bbox in tracks_general.items():
                 trajectory = list(tracker_general.trajectories[track_id])
                 
-                # Analizar con menos frames requeridos
-                if len(trajectory) >= 5:  # Reducido de WINDOW_SIZE
-                    # Verificar arma cercana usando función global
+                # Usamos el len() de la clase BehaviorAnalyzer (ahora es 5)
+                if len(trajectory) >= 5: 
                     weapon_nearby = False
                     for arma_id, arma_bbox in tracks_armas.items():
                         overlap = bbox_overlap(bbox, arma_bbox)
                         distance = bbox_distance(bbox, arma_bbox)
                         
-                        # Considerar arma si hay overlap O está cerca
-                        if overlap > 0.1 or distance < 100:  # Más permisivo
+                        if overlap > 0.1 or distance < 100:
                             weapon_nearby = True
-                            print(f"🔴 ARMA DETECTADA cerca de ID:{track_id} (overlap={overlap:.2f}, dist={distance:.1f})")
+                            print(f"ALERTA: ARMA CERCA de ID:{track_id} (overlap={overlap:.2f}, dist={distance:.1f})")
                             break
                     
-                    # Analizar comportamiento
                     behavior, alert_level, features = behavior_analyzer.analyze_trajectory(
                         trajectory, track_id, weapon_nearby
                     )
@@ -421,37 +440,38 @@ def main():
             # VISUALIZACIÓN
             # ═══════════════════════════════════════════════════
             
-            # Dibujar detecciones generales
+            # Dibujar detecciones generales (personas)
             for track_id, bbox in tracks_general.items():
                 x1, y1, x2, y2 = bbox
                 color = (0, 255, 0)
                 cv2.rectangle(frame_display, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-                cv2.putText(frame_display, f'ID:{track_id}', (int(x1), int(y1)-10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                cv2.putText(frame_display, f'Persona ID:{track_id}', (int(x1), int(y1)-10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
             
-            # Dibujar alertas
+            
+            # Dibujar alertas de MOVIMIENTO (Sin emojis)
             for alerta in alertas_activas:
                 x1, y1, x2, y2 = alerta['bbox']
                 
                 if alerta['alert_level'] == 3:
                     color = (0, 0, 255)
-                    label = f"🔴 {alerta['behavior'].upper()}"
+                    label = f"ALERTA MAX: {alerta['behavior'].upper()}"
                 elif alerta['alert_level'] == 2:
                     color = (0, 165, 255)
-                    label = f"🟠 {alerta['behavior'].upper()}"
+                    label = f"ALERTA: {alerta['behavior'].upper()}"
                 else:
                     color = (0, 255, 255)
-                    label = f"🟡 {alerta['behavior'].upper()}"
+                    label = f"AVISO: {alerta['behavior'].upper()}"
                 
                 cv2.rectangle(frame_display, (int(x1), int(y1)), (int(x2), int(y2)), color, 4)
                 cv2.putText(frame_display, label, (int(x1), int(y1)-30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
                 
                 vel = alerta['features'].get('velocity_mean', 0)
                 dwell = alerta['features'].get('dwelling_time', 0)
                 info = f"Vel:{vel:.1f} Tiempo:{dwell:.1f}s"
                 cv2.putText(frame_display, info, (int(x1), int(y2)+20),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
                 
                 alert_history.append({
                     'frame': frame_count,
@@ -460,24 +480,53 @@ def main():
                     'behavior': alerta['behavior'],
                     'level': alerta['alert_level']
                 })
+
             
-            # Dibujar armas (MEJORADO)
+            # Dibujar armas
             for track_id, bbox in tracks_armas.items():
                 x1, y1, x2, y2 = bbox
-                color = (0, 0, 255)
+                color = (0, 0, 255) 
                 cv2.rectangle(frame_display, (int(x1), int(y1)), (int(x2), int(y2)), color, 5)
                 cv2.putText(frame_display, 'ARMA DETECTADA', (int(x1), int(y1)-10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 3)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 3)
                 
-                # Círculo pulsante para llamar atención
                 center = (int((x1+x2)/2), int((y1+y2)/2))
                 radius = int(max(x2-x1, y2-y1) / 2) + 10
                 cv2.circle(frame_display, center, radius, color, 3)
+
+            
+            # Dibujar detecciones de COMPORTAMIENTOS
+            for det in detecciones_sospechosas:
+                x1, y1, x2, y2, conf, cls = det
+                class_id = int(cls)
+                
+                class_name = get_class_name(class_id, is_weapon=False)
+                color = get_class_color(class_name, is_weapon=False)
+                risk_level = get_risk_level(class_id, is_weapon=False)
+
+                if class_name == 'Unknown' or risk_level == 0:
+                    continue 
+
+                label = f"{class_name.upper()} ({conf:.2f})"
+                
+                cv2.rectangle(frame_display, (int(x1), int(y1)), (int(x2), int(y2)), color, 3)
+                cv2.putText(frame_display, label, (int(x1), int(y1) - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv2.LINE_AA)
+                
+                if risk_level > 0 and class_name not in [a['behavior'] for a in alert_history]:
+                     alert_history.append({
+                        'frame': frame_count,
+                        'time': time.time(),
+                        'track_id': 'N/A',
+                        'behavior': class_name,
+                        'level': risk_level
+                    })
+
             
             # Info general
-            info_text = f"Tracks: {len(tracks_general)} | Armas: {len(tracks_armas)} | Alertas: {len(alertas_activas)} | Frame: {frame_count}"
+            info_text = f"Tracks: {len(tracks_general)} | Armas: {len(detecciones_armas)} | Alertas: {len(alertas_activas)} | Frame: {frame_count}"
             cv2.putText(frame_display, info_text, (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
             # Mostrar frame
             cv2.imshow('NeuroEvol-Threat - Análisis Temporal Completo', frame_display)
@@ -509,12 +558,22 @@ def main():
         print("📊 REPORTE FINAL")
         print("━" * 60)
         print(f"Frames procesados: {frame_count}")
-        print(f"Total de alertas: {len(alert_history)}")
         
-        if alert_history:
+        unique_alerts = []
+        last_behaviors = {}
+        for alert in alert_history:
+            behavior = alert['behavior']
+            current_time = alert['time']
+            if behavior not in last_behaviors or (current_time - last_behaviors[behavior] > 5):
+                unique_alerts.append(alert)
+                last_behaviors[behavior] = current_time
+
+        print(f"Total de alertas únicas: {len(unique_alerts)}")
+        
+        if unique_alerts:
             print("\nAlertas por tipo:")
             from collections import Counter
-            behavior_counts = Counter([a['behavior'] for a in alert_history])
+            behavior_counts = Counter([a['behavior'] for a in unique_alerts])
             for behavior, count in behavior_counts.most_common():
                 print(f"  {behavior:20s}: {count}")
         
@@ -523,6 +582,7 @@ def main():
 
 
 if __name__ == "__main__":
+    print("--- BLOQUE DE EJECUCIÓN PRINCIPAL INICIADO ---") 
     parser = argparse.ArgumentParser(description='NeuroEvol-Threat - Sistema de Análisis Temporal')
     
     parser.add_argument(
@@ -545,29 +605,31 @@ if __name__ == "__main__":
         default=0.3,
         help='Umbral de confianza para detección general'
     )
-    
+
     parser.add_argument(
         '--confidence-behavior',
         type=float,
-        default=0.4,
+        default=0.5, # <-- ### NUEVA CORRECCIÓN ###
         help='Umbral de confianza para comportamientos'
     )
     
     parser.add_argument(
         '--confidence-weapon',
         type=float,
-        default=0.25,
+        default=0.70, # <-- Mantenemos alto
         help='Umbral de confianza para armas'
     )
     
     args = parser.parse_args()
     
-    # Actualizar configuración con argumentos
-    config.CONFIDENCE_GENERAL = args.confidence_general
-    config.CONFIDENCE_SOSPECHOSO = args.confidence_behavior
-    config.CONFIDENCE_ARMAS = args.confidence_weapon
-    config.MODELO_LSTM = args.lstm_model
+    # Actualizar variables globales
+    CONFIDENCE_GENERAL = args.confidence_general
+    CONFIDENCE_ARMAS = args.confidence_weapon
+    CONFIDENCE_SOSPECHOSO = args.confidence_behavior 
     
     import multiprocessing
-    multiprocessing.freeze_support()
-    main()
+    
+    # multiprocessing.freeze_support() 
+    
+    print("--- LLAMANDO A LA FUNCIÓN main() ---") 
+    main(args.source)
