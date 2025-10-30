@@ -3,8 +3,8 @@ import cv2
 
 # Cargar modelos
 modelo_general = YOLO('yolov8n.pt')  # Modelo general (personas, autos, etc.)
-modelo_principal = ''
-modelo_armas = YOLO('C:/Users/paufu/runs/detect/arma_yolov8_estable/weights/best.pt')  # Modelo armas
+modelo_principal = YOLO('Modelos sin optimizar/yolov8_principal/weights/best.pt')   # Ruta al modelo principal personalizado
+modelo_armas = YOLO('Modelos sin optimizar/arma_yolov8_estable/weights/best.pt')  # Modelo armas
 
 # Captura de video desde webcam
 cap = cv2.VideoCapture(0)
