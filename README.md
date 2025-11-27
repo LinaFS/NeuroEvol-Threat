@@ -72,7 +72,12 @@ A diferencia de los sistemas tradicionales que solo detectan **objetos estático
 - **Análisis de trayectorias** espaciales de objetos/personas
 - **Ventana temporal deslizante** para captura de secuencias
 - **Clasificación de comportamientos** mediante:
-  - LSTM para secuencias cortas
+   - LSTM para secuencias cortas
+
+Nota: si has entrenado y guardado el checkpoint LSTM (`behavior_lstm_final.pth`) dentro
+de la carpeta `models/` en la raíz del proyecto, `main_RP.py` intentará cargarlo
+automáticamente para usarlo en la predicción de comportamientos temporales (ventana
+por defecto: 30 frames). Si no existe, el sistema seguirá usando las reglas heurísticas.
   - Transformers para contexto largo
 - Detección de anomalías basada en:
   - Velocidad de movimiento

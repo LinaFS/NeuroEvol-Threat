@@ -16,6 +16,10 @@ import cv2
 import numpy as np
 import time
 from collections import deque, defaultdict
+from pathlib import Path
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import argparse
 
 # Importar configuración de clases
@@ -35,6 +39,10 @@ from classes_config import (
 MODELO_GENERAL = 'yolo11n.pt'
 MODELO_SOSPECHOSO = r'ModeloSopechaOptimizado\best_model_ga_optimized\weights\best.pt'
 MODELO_ARMAS = r'ModeloArmasOptimizado\best_model_ga_optimized\weights\best.pt'
+MODELO_LSTM = r'models/behavior_lstm_final.pth'
+# Nota: si colocas aquí el checkpoint de LSTM (`behavior_lstm_final.pth`)
+# el archivo `main_RP.py` intentará cargarlo automáticamente y usarlo para
+# clasificar comportamientos temporales (ventana por defecto: 30 frames).
 
 # ============================================
 # CLASES COCO DE INTERÉS PARA SEGURIDAD
@@ -74,6 +82,42 @@ PERSON_PROXIMITY_THRESHOLD = 150  # píxeles
 # ============================================
 # FUNCIONES AUXILIARES
 # ============================================
+
+# ============================================
+# MODELO LSTM (estructura para carga / inferencia)
+# ============================================
+class BehaviorLSTM(nn.Module):
+    def __init__(self, input_dim=20, hidden_dim=128, num_layers=2, num_classes=6, dropout=0.3):
+        super(BehaviorLSTM, self).__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.num_classes = num_classes
+
+        self.lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0,
+            bidirectional=False
+        )
+
+        self.fc1 = nn.Linear(hidden_dim, hidden_dim // 2)
+        self.dropout = nn.Dropout(dropout)
+        self.fc2 = nn.Linear(hidden_dim // 2, num_classes)
+        self.batch_norm = nn.BatchNorm1d(hidden_dim // 2)
+
+    def forward(self, x):
+        lstm_out, (hidden, cell) = self.lstm(x)
+        last_output = lstm_out[:, -1, :]
+        out = self.fc1(last_output)
+        out = self.batch_norm(out)
+        out = F.relu(out)
+        out = self.dropout(out)
+        out = self.fc2(out)
+        return out, hidden
+
 
 def bbox_overlap(bbox1, bbox2):
     """Calcular IoU entre dos bboxes"""
@@ -286,9 +330,13 @@ class MultiClassTracker:
 # ============================================
 class BehaviorAnalyzer:
     """Analiza trayectorias de personas"""
-    def __init__(self):
+    def __init__(self, lstm_model=None, lstm_classes=None, lstm_window=30):
         self.alert_cooldown = {}
         self.cooldown_time = 5
+        # Optional LSTM model for behavior classification
+        self.lstm_model = lstm_model
+        self.lstm_classes = lstm_classes
+        self.lstm_window = lstm_window
     
     def analyze_trajectory(self, trajectory, track_id, weapon_detected=False):
         if len(trajectory) < 5: 
@@ -298,7 +346,29 @@ class BehaviorAnalyzer:
         behavior = 'normal'
         alert_level = 0
         
-        if weapon_detected:
+        # If a trained LSTM is available and there are enough frames, use it
+        if self.lstm_model is not None and len(trajectory) >= self.lstm_window:
+            try:
+                seq = self._trajectory_to_sequence(trajectory, self.lstm_window)
+                with torch.no_grad():
+                    x = torch.FloatTensor(seq).unsqueeze(0)  # (1, seq_len, input_dim)
+                    outputs, _ = self.lstm_model(x.to(next(self.lstm_model.parameters()).device))
+                    probs = F.softmax(outputs, dim=1).cpu().numpy()[0]
+                    pred = int(probs.argmax())
+                    behavior = self.lstm_classes.get(pred, 'normal')
+                    conf = float(probs[pred])
+                    # Map model output to alert_level
+                    if behavior == 'weapon_carry':
+                        alert_level = 3
+                    elif behavior in ('aggression', 'loitering', 'erratic_movement'):
+                        alert_level = 2
+                    elif behavior == 'running' or behavior == 'critical':
+                        alert_level = 3 if behavior == 'critical' else 1
+            except Exception:
+                # If LSTM inference fails, fall back to rules
+                behavior = 'normal'
+                alert_level = 0
+        elif weapon_detected:
             behavior = 'weapon_carry'
             alert_level = 3
         elif features['dwelling_time'] > LOITERING_TIME and features['velocity_mean'] < 0.5:
@@ -319,6 +389,111 @@ class BehaviorAnalyzer:
             self.alert_cooldown[track_id] = current_time
         
         return behavior, alert_level, features
+
+    def _trajectory_to_sequence(self, trajectory, seq_len=30):
+        """Convert tracker trajectory to a sequence of features expected by the LSTM.
+        This builds an approximate 20-dim feature vector per timestep based on
+        centroid, bbox and timestamps stored by the tracker. Missing/unknown
+        features are approximated or zero-filled.
+
+        Returns array shape (seq_len, input_dim)
+        """
+        # Number of features expected by the trained model
+        input_dim = 20
+
+        # Use last seq_len points, pad by repeating earliest if needed
+        T = len(trajectory)
+        if T >= seq_len:
+            window = list(trajectory[-seq_len:])
+        else:
+            # pad by repeating first frame to match length
+            pad = [trajectory[0]] * (seq_len - T)
+            window = pad + list(trajectory)
+
+        seq = []
+        # compute per-frame simple features
+        centroids = [pt['centroid'] for pt in window]
+        bboxes = [pt['bbox'] for pt in window]
+        times = [pt['timestamp'] for pt in window]
+
+        # velocities between consecutive frames
+        velocities = []
+        for i in range(1, len(centroids)):
+            dx = centroids[i][0] - centroids[i-1][0]
+            dy = centroids[i][1] - centroids[i-1][1]
+            dt = max(1e-6, times[i] - times[i-1])
+            velocities.append(((dx)/dt, (dy)/dt))
+
+        # for every frame, create a vector; where precise measures are undefined, approximate
+        for i in range(len(window)):
+            cx, cy = centroids[i]
+            x_vals = [c[0] for c in centroids]
+            y_vals = [c[1] for c in centroids]
+
+            x_mean = float(np.mean(x_vals))
+            y_mean = float(np.mean(y_vals))
+            x_std = float(np.std(x_vals))
+            y_std = float(np.std(y_vals))
+
+            x1,y1,x2,y2 = bboxes[i]
+            area = float(max(0.0, (x2 - x1) * (y2 - y1)))
+
+            # simple velocity stats
+            vx_list = [v[0] for v in velocities] if velocities else [0.0]
+            vy_list = [v[1] for v in velocities] if velocities else [0.0]
+            speed_list = [np.sqrt(vx*vx + vy*vy) for vx,vy in velocities] if velocities else [0.0]
+
+            velocity_mean = float(np.mean(speed_list))
+            velocity_max = float(np.max(speed_list))
+            velocity_std = float(np.std(speed_list))
+
+            # acceleration approximations (differences of speeds)
+            accs = []
+            for j in range(1, len(speed_list)):
+                dt_acc = max(1e-6, times[j] - times[j-1])
+                accs.append((speed_list[j] - speed_list[j-1]) / dt_acc)
+
+            acceleration_mean = float(np.mean(accs)) if accs else 0.0
+            acceleration_max = float(np.max(accs)) if accs else 0.0
+
+            # direction change estimate: angle between previous and next movement
+            direction_changes = 0
+            if len(window) >= 3:
+                for j in range(2, len(window)):
+                    v1 = np.array(centroids[j-1]) - np.array(centroids[j-2])
+                    v2 = np.array(centroids[j]) - np.array(centroids[j-1])
+                    n1 = np.linalg.norm(v1)
+                    n2 = np.linalg.norm(v2)
+                    if n1 > 0 and n2 > 0:
+                        cos_angle = np.dot(v1, v2) / (n1 * n2)
+                        angle = np.degrees(np.arccos(np.clip(cos_angle, -1, 1)))
+                        if angle > 45:
+                            direction_changes += 1
+
+            dwelling_time = float(times[-1] - times[0]) if len(times) > 1 else 0.0
+            distance_traveled = float(sum([np.linalg.norm(np.array(centroids[i]) - np.array(centroids[i-1]))
+                                           for i in range(1, len(centroids))]))
+            trajectory_duration = dwelling_time
+            frames_count = float(len(window))
+
+            nearby_objects = 0.0
+            min_distance = float(np.min([np.linalg.norm(np.array(c) - np.array([cx,cy])) for c in centroids])) if centroids else 0.0
+            interaction_duration = 0.0
+            zone_visited = 0.0
+
+            # Build feature vector of length 20 (best-effort approximation)
+            feat = np.array([
+                x_mean, y_mean, x_std, y_std, area, 0.0,
+                velocity_mean, velocity_max, velocity_std,
+                acceleration_mean, acceleration_max, float(direction_changes),
+                dwelling_time, distance_traveled, trajectory_duration, frames_count,
+                nearby_objects, min_distance, interaction_duration, zone_visited
+            ], dtype=np.float32)
+
+            seq.append(feat)
+
+        seq = np.array(seq, dtype=np.float32)
+        return seq
     
     def _extract_features(self, trajectory):
         features = {}
@@ -439,13 +614,39 @@ def main(video_source):
     except Exception as e:
         print(f"⚠️  Modelo de comportamientos no disponible: {e}")
         modelo_sospechoso = None
+
+    # Cargar LSTM (si existe)
+    lstm_model = None
+    lstm_classes = None
+    lstm_window = 30
+    if Path(MODELO_LSTM).exists():
+        try:
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            ckpt = torch.load(MODELO_LSTM, map_location=device)
+            cfg = ckpt.get('config', {})
+            lstm_window = cfg.get('window_size', lstm_window)
+            lstm_model = BehaviorLSTM(
+                input_dim=cfg.get('input_dim', 20),
+                hidden_dim=cfg.get('hidden_dim', 128),
+                num_layers=cfg.get('num_layers', 2),
+                num_classes=cfg.get('num_classes', 6),
+                dropout=cfg.get('dropout', 0.3)
+            ).to(device)
+            lstm_model.load_state_dict(ckpt['model_state_dict'])
+            lstm_model.eval()
+            lstm_classes = ckpt.get('lstm_classes', None)
+            print(f"✅ LSTM cargado desde: {MODELO_LSTM} (device={device})")
+        except Exception as e:
+            print(f"⚠️ Error cargando LSTM ({MODELO_LSTM}): {e}")
+            lstm_model = None
+            lstm_classes = None
     
     print("✅ Modelos cargados")
     
     # Inicializar trackers (separados por tipo)
     tracker_objetos = MultiClassTracker(max_disappeared=MAX_DISAPPEARED)
     tracker_armas = MultiClassTracker(max_disappeared=MAX_DISAPPEARED)
-    behavior_analyzer = BehaviorAnalyzer()
+    behavior_analyzer = BehaviorAnalyzer(lstm_model=lstm_model, lstm_classes=lstm_classes, lstm_window=lstm_window)
     context_analyzer = ContextAnalyzer()
     
     # Captura de video
